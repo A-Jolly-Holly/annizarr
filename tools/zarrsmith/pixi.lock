@@ -4057,21 +4057,6 @@ packages:
   - pkg:pypi/contourpy?source=hash-mapping
   size: 244035
   timestamp: 1769155978578
-- pypi: ./
-  name: convert-to-zarr
-  version: 0.1.0
-  sha256: cdf10cc0b1c728a83b24ef59d597cfde4d4eefaf95418570a016cf88321a16fa
-  requires_dist:
-  - anndata>=0.12.10,<0.13
-  - zarr>=3.0.0
-  - numpy>=1.24.0,<2.5
-  - scipy>=1.10.0
-  - pyyaml>=6.0
-  - scanpy>=1.9.0
-  - dask[array]>=2023.1.0
-  - icechunk>=2.0.6
-  - pytest>=8.0 ; extra == 'dev'
-  requires_python: '>=3.10,<3.13'
 - conda: https://conda.anaconda.org/conda-forge/noarch/cycler-0.12.1-pyhcf101f3_2.conda
   sha256: bb47aec5338695ff8efbddbc669064a3b10fe34ad881fb8ad5d64fbfa6910ed1
   md5: 4c2a8fef270f6c69591889b93f9f55c1
@@ -13580,6 +13565,21 @@ packages:
   - pkg:pypi/zarr?source=compressed-mapping
   size: 471664
   timestamp: 1785511642744
+- pypi: ./
+  name: zarrsmith
+  version: 0.2.0
+  sha256: 1b6db39c240577d515efc955949ddc1b1c1192879ceb99dbca0295db6a9c6a07
+  requires_dist:
+  - anndata>=0.12.10,<0.13
+  - zarr>=3.0.0
+  - numpy>=1.24.0,<2.5
+  - scipy>=1.10.0
+  - pyyaml>=6.0
+  - scanpy>=1.9.0
+  - dask[array]>=2023.1.0
+  - icechunk>=2.0.6
+  - pytest>=8.0 ; extra == 'dev'
+  requires_python: '>=3.10,<3.13'
 - conda: https://conda.anaconda.org/conda-forge/noarch/zict-3.0.0-pyhd8ed1ab_1.conda
   sha256: 5488542dceeb9f2874e726646548ecc5608060934d6f9ceaa7c6a48c61f9cc8d
   md5: e52c2ef711ccf31bb7f70ca87d144b9e
