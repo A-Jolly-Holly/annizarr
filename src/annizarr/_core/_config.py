@@ -77,7 +77,8 @@ class ChunkConfig:
         CSC chunking to ``nnz_chunk``. Ignored for CSR.
     nnz_chunk
         Flat ``data``/``indices`` chunk length (nonzeros) for sparse output when the
-        matching axis chunk above is unset.
+        matching axis chunk above is unset. Python-only: the CLI sizes sparse chunks
+        through ``--row-chunk``/``--col-chunk`` and otherwise takes this default.
     cpus
         Workers for parallel matrix chunk writes: threads for a thread-safe reader
         (in-memory or zarr-backed), processes for a lazy h5py-backed one (not thread-safe).
@@ -101,7 +102,7 @@ class ChunkConfig:
 
     row_chunk: int | None = None
     col_chunk: int | None = None
-    nnz_chunk: int = 1_000_000
+    nnz_chunk: int = 9_000_000
     cpus: int = field(default_factory=_all_cpus)
     shard_factor: int = 1
     auto_shard: bool = False

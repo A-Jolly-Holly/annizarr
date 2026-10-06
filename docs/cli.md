@@ -31,10 +31,10 @@ options:
                         output X layout (default: csr)
   --cpus CPUS           parallel band workers (default: all cores)
   --row-chunk N         rows per chunk: exact for dense output (default: 2048); for csr, about N
-                        cells' worth of nonzeros per chunk (default: 1000000 nonzeros). Not for
+                        cells' worth of nonzeros per chunk (default: 9000000 nonzeros). Not for
                         csc.
   --col-chunk N         columns per chunk: exact for dense output (default: 2048); for csc, about
-                        N genes' worth of nonzeros per chunk (default: 1000000 nonzeros). Not for
+                        N genes' worth of nonzeros per chunk (default: 9000000 nonzeros). Not for
                         csr.
   --auto-shard          shard the anndata-written elements and the 1-D sparse arrays with zarr's
                         automatic shard shape (default: off)
@@ -70,10 +70,10 @@ options:
   -o, --output OUTPUT   output store path or URI
   --matrix MATRIX       which matrix to rechunk: X, layers/<name>, or raw/X (default: X)
   --row-chunk N         rows per chunk: exact for dense output (default: 2048); for csr, about N
-                        cells' worth of nonzeros per chunk (default: 1000000 nonzeros). Not for
+                        cells' worth of nonzeros per chunk (default: 9000000 nonzeros). Not for
                         csc.
   --col-chunk N         columns per chunk: exact for dense output (default: 2048); for csc, about
-                        N genes' worth of nonzeros per chunk (default: 1000000 nonzeros). Not for
+                        N genes' worth of nonzeros per chunk (default: 9000000 nonzeros). Not for
                         csr.
   --auto-shard          shard the anndata-written elements and the 1-D sparse arrays with zarr's
                         automatic shard shape (default: off)
@@ -162,10 +162,10 @@ options:
   --target-sum TARGET_SUM
                         library-size normalization target (default: 10000.0)
   --row-chunk N         rows per chunk: exact for dense output (default: 2048); for csr, about N
-                        cells' worth of nonzeros per chunk (default: 1000000 nonzeros). Not for
+                        cells' worth of nonzeros per chunk (default: 9000000 nonzeros). Not for
                         csc.
   --col-chunk N         columns per chunk: exact for dense output (default: 2048); for csc, about
-                        N genes' worth of nonzeros per chunk (default: 1000000 nonzeros). Not for
+                        N genes' worth of nonzeros per chunk (default: 9000000 nonzeros). Not for
                         csr.
   --auto-shard          shard the anndata-written elements and the 1-D sparse arrays with zarr's
                         automatic shard shape (default: off)

@@ -47,7 +47,7 @@ keyword arguments (`None` means unset) onto a config; the CLI uses it.
 | `io.consolidate_metadata` | `False` | Consolidate zarr metadata after writing (plain zarr only). |
 | `chunks.row_chunk` | `None` | Rows per chunk. Exact for dense X (2048 when unset); for CSR, about this many cells' worth of nonzeros per chunk. Ignored for CSC. |
 | `chunks.col_chunk` | `None` | Columns per chunk. Exact for dense X (2048 when unset); for CSC, about this many genes' worth of nonzeros per chunk. Ignored for CSR. |
-| `chunks.nnz_chunk` | `1_000_000` | Flat `data`/`indices` chunk length for sparse output when the matching axis chunk is unset. |
+| `chunks.nnz_chunk` | `9_000_000` | Flat `data`/`indices` chunk length for sparse output when the matching axis chunk is unset. |
 | `chunks.cpus` | all cores | Parallel band workers for matrix writes. |
 | `chunks.shard_factor` | `1` | Chunks per shard along each axis of dense X; `1` means no sharding. Python-only. |
 | `chunks.auto_shard` | `False` | Shard the 1-D sparse arrays and anndata-written elements with zarr's `shards="auto"`. |

@@ -28,7 +28,7 @@ at least one gene, and an X.
   default to CSC, for column reads.
 - Dense: chunks of `row_chunk` by `col_chunk` (2048 by 2048 by default), optionally packed into
   shards of `shard_factor` chunks per axis (Python-only knob).
-- Sparse: `data` and `indices` are 1-D arrays chunked by `nnz_chunk` nonzeros (1,000,000 by
+- Sparse: `data` and `indices` are 1-D arrays chunked by `nnz_chunk` nonzeros (9,000,000 by
   default). Setting the major-axis chunk (`--row-chunk` for CSR, `--col-chunk` for CSC) sizes them
   to about that many cells or genes per chunk instead, using the average nonzeros per row or
   column. The other axis's chunk setting is ignored for sparse output (a usage error on `convert`

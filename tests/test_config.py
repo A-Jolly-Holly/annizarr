@@ -9,7 +9,7 @@ from annizarr.config import AppConfig, ChunkConfig, IOConfig, apply_cli_override
 def test_defaults() -> None:
     cfg = AppConfig()
     assert cfg.chunks.row_chunk is None and cfg.chunks.col_chunk is None  # dense falls back to DENSE_CHUNK
-    assert DENSE_CHUNK == 2048 and cfg.chunks.nnz_chunk == 1_000_000
+    assert DENSE_CHUNK == 2048 and cfg.chunks.nnz_chunk == 9_000_000
     assert cfg.io.layout == "csr"
     assert cfg.chunks.auto_shard is False
     assert cfg.io.lazy is True

@@ -67,13 +67,13 @@ Some of the main options; the docs have all of them:
   `convert`, `csc` for the `add-expr` layer. CSR suits row-wise access, CSC and dense column queries.
 - `--row-chunk N`, `--col-chunk N` — chunk shape. Exact rows and columns for dense; for sparse, about
   N cells (csr) or N genes (csc) per chunk, sized from the average nonzeros. Defaults: 2048 for dense,
-  about 1,000,000 nonzeros for sparse. `convert`, `rechunk`, `add-expr`.
+  about 9,000,000 nonzeros for sparse. `convert`, `rechunk`, `add-expr`.
 - `--auto-shard` — shard the 1-D sparse arrays and anndata-written elements with zarr's automatic
   shard shape (default: off). Every command but `append`.
 - `--ic` — write through an Icechunk repository; `--branch B` and `-m MSG` pick the branch and commit
   message. `append` and `add-expr` detect an existing repo on their own. `convert`, `rechunk`, `sort`.
 - `--sort-by COL…` on `convert` / `--by COL…` on `sort` — physically order rows by obs columns,
-  primary key first.
+  primary key first
 
 **What gets written.** Every store is anndata-readable zarr v3 with `encoding-type`/`encoding-version`
 attrs matching anndata 0.12's on-disk spec. X and layers may be dense, CSR or CSC on input (h5ad or
