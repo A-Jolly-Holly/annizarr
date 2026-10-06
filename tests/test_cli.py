@@ -59,7 +59,7 @@ def test_convert_flag_mappings(tmp_path: Path) -> None:
     # --auto-shard shards the sparse X arrays
     h5_big = make_h5ad(tmp_path, "big.h5ad", adata=make_adata(n_obs=30, n_vars=20))
     out_shard = tmp_path / "shard.zarr"
-    assert main(["convert", str(h5_big), "-o", str(out_shard), "--x-storage", "csr", "--auto-shard"]) == 0
+    assert main(["convert", str(h5_big), "-o", str(out_shard), "--layout", "csr", "--auto-shard"]) == 0
     assert_anndata_readable(out_shard)
     root = zarr.open_group(str(out_shard), mode="r")
     assert root["X"]["data"].shards is not None
@@ -115,7 +115,7 @@ def test_op_happy_paths(tmp_path: Path) -> None:
     h5 = make_h5ad(tmp_path, "in.h5ad")
     out = tmp_path / "out.zarr"
     assert main(["convert", str(h5), "-o", str(out)]) == 0
-    assert main(["add-expr", str(out), "--chunk-elems", "16"]) == 0
+    assert main(["add-expr", str(out), "--col-chunk", "2"]) == 0
     assert_anndata_readable(out)
     assert "gexp" in ad.read_zarr(str(out)).layers
 
@@ -123,7 +123,7 @@ def test_op_happy_paths(tmp_path: Path) -> None:
     store = tmp_path / "store.zarr"
     assert main(["convert", str(h5_r), "-o", str(store)]) == 0
     rechunked = tmp_path / "rechunked.zarr"
-    assert main(["rechunk", str(store), "-o", str(rechunked), "--sparse-flat-chunk", "4"]) == 0
+    assert main(["rechunk", str(store), "-o", str(rechunked), "--row-chunk", "2"]) == 0
     assert ad.read_zarr(str(rechunked)).n_obs == 8
 
     # non-decreasing codes after sort is checked regardless of the input's initial order,
@@ -188,8 +188,8 @@ def test_help_shows_config_defaults(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit) as exc:
         main(["convert", "--help"])
     assert exc.value.code == 0
-    out = capsys.readouterr().out
-    assert f"default: {ChunkConfig().x_row_chunk}" in out
+    out = " ".join(capsys.readouterr().out.split())  # argparse wraps help text; compare on one line
+    assert "default: 2048" in out and f"{ChunkConfig().nnz_chunk} nonzeros" in out
 
 
 def test_help_usage_names_annizarr(capsys: pytest.CaptureFixture[str]) -> None:

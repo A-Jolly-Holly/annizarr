@@ -16,7 +16,7 @@ _EXPECTED_DENSE = np.array([[1.0, 0.0, 3.0], [0.0, 2.0, 0.0]], dtype=np.float32)
 
 
 def _cfg() -> AppConfig:
-    return AppConfig(io=IOConfig(), chunks=ChunkConfig(x_row_chunk=4, x_col_chunk=4, sparse_flat_chunk=64))
+    return AppConfig(io=IOConfig(), chunks=ChunkConfig(row_chunk=4, col_chunk=4, nnz_chunk=64))
 
 
 def test_v3_reads_expected_x_obs_var_gex_filter_and_dtype_widen(tmp_path: Path) -> None:

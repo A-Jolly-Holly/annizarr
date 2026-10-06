@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -16,7 +17,7 @@ if TYPE_CHECKING:
 
     import zarr
 
-    from annizarr.typing import PathLike, XStorage
+    from annizarr.typing import Layout, PathLike
 
 logger = logging.getLogger(__name__)
 
@@ -72,8 +73,8 @@ def sort(
         raise ConversionError("sort streams through local temp stores; a remote output is not supported yet.")
     if not by:
         raise ConversionError("sort requires by=[OBS_COLUMN, ...].")
-    if cfg.io.x_storage != "csr":
-        raise ConversionError(f"sort supports x_storage='csr' only (got '{cfg.io.x_storage}').")
+    if cfg.io.layout != "csr":
+        raise ConversionError(f"sort supports layout='csr' only (got '{cfg.io.layout}').")
     check_output_target(output, cfg)
 
     src = open_input_group(store)
@@ -101,18 +102,19 @@ def sort(
 
     after_write = None
     if gexp_params is not None:
-        fmt, chunk_elems, target_sum = gexp_params
+        layout, flat_chunk, target_sum = gexp_params
         if target_sum is None:
             logger.warning("layers/gexp has no recorded target_sum; re-deriving at 1e4.")
             target_sum = 1e4
+        # pin the existing layer's flat chunk through nnz_chunk (axis chunks cleared) so the
+        # re-derived layer is laid out like the original
+        layer_cfg = replace(cfg, chunks=replace(cfg.chunks, row_chunk=None, col_chunk=None, nnz_chunk=flat_chunk))
 
-        def after_write(
-            root: zarr.Group, fmt: XStorage = fmt, chunk_elems: int = chunk_elems, target_sum: float = target_sum
-        ) -> None:
+        def after_write(root: zarr.Group, layout: Layout = layout, target_sum: float = target_sum) -> None:
             # re-derives gexp before stream_sorted_store's finalize(), so it lands in the
             # same icechunk commit rather than a separate add_expr call afterwards.
-            write_expr_layer(root, cfg, fmt=fmt, chunk_elems=chunk_elems, target_sum=target_sum)
-            logger.warning(f"layers/gexp re-derived ({fmt}) on the sorted store.")
+            write_expr_layer(root, layer_cfg, layout=layout, target_sum=target_sum)
+            logger.warning(f"layers/gexp re-derived ({layout}) on the sorted store.")
 
     snapshot_id = stream_sorted_store(
         x,

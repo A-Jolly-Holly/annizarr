@@ -155,18 +155,18 @@ def test_large_store_pipeline_is_memory_bounded(tmp_path_factory: pytest.TempPat
     got = sparse_dataset(zarr.open_group(str(csr_store), mode="r")["X"])[rows].toarray()
     np.testing.assert_array_equal(got, expected)
 
-    # 2. convert --x-storage csc (lazy CSR -> csc: the new streamed transpose, never
+    # 2. convert --layout csc (lazy CSR -> csc: the new streamed transpose, never
     #    materialising X — see write_transposed_sparse)
     _step(
         "convert_csc",
-        ["-q", "convert", str(large_h5ad), "-o", str(csc_store), "--x-storage", "csc", "--cpus", "1"],
+        ["-q", "convert", str(large_h5ad), "-o", str(csc_store), "--layout", "csc", "--cpus", "1"],
     )
     got_csc = sparse_dataset(zarr.open_group(str(csc_store), mode="r")["X"])[rows].toarray()
     np.testing.assert_array_equal(got_csc, expected)
 
     # 3. add-expr --format csc on the csr store (streamed lognorm CSR -> csc via the same
     #    write_transposed_sparse engine, with row_scale)
-    _step("add_expr_csc", ["-q", "add-expr", str(csr_store), "--format", "csc", "--cpus", "1"])
+    _step("add_expr_csc", ["-q", "add-expr", str(csr_store), "--layout", "csc", "--cpus", "1"])
     root = zarr.open_group(str(csr_store), mode="r")
     gexp = sparse_dataset(root["layers/gexp"])[rows].toarray()
     x_rows = sparse_dataset(root["X"])[rows].toarray().astype(np.float64)

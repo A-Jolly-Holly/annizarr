@@ -31,7 +31,7 @@ def write_adata(adata: ad.AnnData, store: zarr.Group, cfg: AppConfig) -> None:
     tmp_dir = _local_tmp_dir(store)
     x_reader = as_reader(adata.X, cfg=cfg, tmp_dir=tmp_dir)
     try:
-        with stage(f"Writing X (shape={x_reader.shape}, {cfg.io.x_storage})"):
+        with stage(f"Writing X (shape={x_reader.shape}, {cfg.io.layout})"):
             write_matrix(store, "X", x_reader, cfg)
     finally:
         x_reader.close()

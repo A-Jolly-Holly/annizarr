@@ -26,7 +26,7 @@ from annizarr.ops import concat, convert_h5ad
 
 
 def _chunks(**kw) -> ChunkConfig:
-    base = dict(x_row_chunk=2, x_col_chunk=2, sparse_flat_chunk=2048)
+    base = dict(row_chunk=2, col_chunk=2, nnz_chunk=2048)
     base.update(kw)
     return ChunkConfig(**base)
 
@@ -137,11 +137,11 @@ def test_lazy_h5ad_into_icechunk_runs_the_read_ahead_pipeline(tmp_path: Path, ca
     own threads write them into the session. Covers both dense and csr output."""
     pytest.importorskip("icechunk")
 
-    for x_storage in ("csr", "dense"):
+    for layout in ("csr", "dense"):
         _labelled_h5ad(tmp_path / "in.h5ad")
-        out = tmp_path / f"repo_{x_storage}.icechunk"
+        out = tmp_path / f"repo_{layout}.icechunk"
         cfg = AppConfig(
-            io=IOConfig(overwrite=True, backend="icechunk", lazy=True, x_storage=x_storage),
+            io=IOConfig(overwrite=True, backend="icechunk", lazy=True, layout=layout),
             chunks=_chunks(cpus=2),
         )
         caplog.clear()
@@ -154,7 +154,7 @@ def test_lazy_h5ad_into_icechunk_runs_the_read_ahead_pipeline(tmp_path: Path, ca
         assert not any("single-threaded" in m for m in messages)
 
         g = open_input_group(str(out), branch="main")
-        if x_storage == "dense":
+        if layout == "dense":
             id_col = np.asarray(g["X"][:, 0]).ravel()
         else:
             from anndata.io import sparse_dataset
@@ -212,10 +212,10 @@ def test_sort_writes_valid_anndata_and_self_serve_reads(tmp_path: Path) -> None:
     assert _id_set(Xcross) == {2, 4, 5}
 
 
-def test_sort_dense_writes_contiguous_ranges_and_rejects_unsupported_x_storage(tmp_path: Path) -> None:
+def test_sort_dense_writes_contiguous_ranges_and_rejects_unsupported_layout(tmp_path: Path) -> None:
     """Dense X supports --sort-by: rows are physically sorted so each key tuple is a
     contiguous run derivable from the sorted obs and read directly via X[start:end]
-    (stock zarr, no annizarr, no index). --sort-by also requires x_storage='csr' or 'dense'
+    (stock zarr, no annizarr, no index). --sort-by also requires layout='csr' or 'dense'
     in general, and further requires 'csr' specifically when combined with lazy
     (streamed bucketing is csr-only; dense sort still works eagerly, as above)."""
     _labelled_h5ad(tmp_path / "in.h5ad")
@@ -223,7 +223,7 @@ def test_sort_dense_writes_contiguous_ranges_and_rejects_unsupported_x_storage(t
     # lazy=False pinned: dense --sort-by is the eager (maybe_sort_adata) path, not the
     # lazy-streamed (csr-only) one, regardless of io.lazy's own default.
     cfg = AppConfig(
-        io=IOConfig(overwrite=True, x_storage="dense", lazy=False),
+        io=IOConfig(overwrite=True, layout="dense", lazy=False),
         chunks=_chunks(),
         grouping=GroupingConfig(enabled=True, sort_by=("cell_type", "demographic")),
     )
@@ -252,18 +252,18 @@ def test_sort_dense_writes_contiguous_ranges_and_rejects_unsupported_x_storage(t
             assert (obs_full["cell_type"].to_numpy()[s:i] == keys[s][0]).all()
             s = i
 
-    # lazy=False: this exercises maybe_sort_adata's own x_storage guard, not the lazy-streamed
+    # lazy=False: this exercises maybe_sort_adata's own layout guard, not the lazy-streamed
     # path's stricter csr-only one (covered separately by cfg_lazy_dense just below).
     cfg_csc = AppConfig(
-        io=IOConfig(overwrite=True, x_storage="csc", lazy=False),
+        io=IOConfig(overwrite=True, layout="csc", lazy=False),
         chunks=_chunks(),
         grouping=GroupingConfig(enabled=True, sort_by=("cell_type",)),
     )
-    with pytest.raises(ConversionError, match="requires x_storage='csr' or 'dense'"):
+    with pytest.raises(ConversionError, match="requires layout='csr' or 'dense'"):
         convert_h5ad(str(tmp_path / "in.h5ad"), output=str(tmp_path / "o1.zarr"), cfg=cfg_csc)
 
     cfg_lazy_dense = AppConfig(
-        io=IOConfig(overwrite=True, lazy=True, x_storage="dense"),
+        io=IOConfig(overwrite=True, lazy=True, layout="dense"),
         chunks=_chunks(),
         grouping=GroupingConfig(enabled=True, sort_by=("cell_type",)),
     )
@@ -273,7 +273,7 @@ def test_sort_dense_writes_contiguous_ranges_and_rejects_unsupported_x_storage(t
 
 def _lazy_sorted_cfg() -> AppConfig:
     return AppConfig(
-        io=IOConfig(overwrite=True, lazy=True, x_storage="csr"),
+        io=IOConfig(overwrite=True, lazy=True, layout="csr"),
         chunks=_chunks(),
         grouping=GroupingConfig(enabled=True, sort_by=("cell_type", "demographic")),
     )
@@ -321,7 +321,7 @@ def test_lazy_sort_default_commit_message_names_sort_columns(tmp_path: Path) -> 
     adata = ad.read_h5ad(tmp_path / "in.h5ad", backed="r")
     out = tmp_path / "repo.icechunk"
     cfg = AppConfig(
-        io=IOConfig(overwrite=True, lazy=True, x_storage="csr", backend="icechunk"),
+        io=IOConfig(overwrite=True, lazy=True, layout="csr", backend="icechunk"),
         chunks=_chunks(),
         grouping=GroupingConfig(enabled=True, sort_by=("cell_type", "demographic")),
     )
@@ -349,14 +349,14 @@ def test_sort_through_icechunk_and_read(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Dense X sharding (--x-shard-factor)
+# Dense X sharding (ChunkConfig.shard_factor; Python-only, no CLI flag)
 # ---------------------------------------------------------------------------
 
 
 def _dense_cfg(shard_factor: int = 1, **chunk_kw) -> AppConfig:
     return AppConfig(
-        io=IOConfig(overwrite=True, x_storage="dense"),
-        chunks=_chunks(x_shard_factor=shard_factor, **chunk_kw),
+        io=IOConfig(overwrite=True, layout="dense"),
+        chunks=_chunks(shard_factor=shard_factor, **chunk_kw),
     )
 
 
@@ -400,8 +400,8 @@ def test_sharding_lazy_dense_parallel_roundtrip(tmp_path: Path) -> None:
     _labelled_h5ad(tmp_path / "in.h5ad")
     out = tmp_path / "lazy_sharded.zarr"
     cfg = AppConfig(
-        io=IOConfig(overwrite=True, x_storage="dense", lazy=True),
-        chunks=_chunks(x_shard_factor=2, cpus=2),
+        io=IOConfig(overwrite=True, layout="dense", lazy=True),
+        chunks=_chunks(shard_factor=2, cpus=2),
     )
     convert_h5ad(str(tmp_path / "in.h5ad"), output=str(out), cfg=cfg)
 
@@ -414,8 +414,8 @@ def test_sharding_ignored_for_sparse(tmp_path: Path, caplog) -> None:
     _labelled_h5ad(tmp_path / "in.h5ad")
     out = tmp_path / "sparse.zarr"
     cfg = AppConfig(
-        io=IOConfig(overwrite=True, x_storage="csr"),
-        chunks=_chunks(x_shard_factor=4),
+        io=IOConfig(overwrite=True, layout="csr"),
+        chunks=_chunks(shard_factor=4),
     )
     convert_h5ad(str(tmp_path / "in.h5ad"), output=str(out), cfg=cfg)
 
@@ -427,8 +427,8 @@ def test_sharding_ignored_for_sparse(tmp_path: Path, caplog) -> None:
 
 
 def test_shard_factor_below_one_rejected() -> None:
-    cfg = AppConfig(chunks=ChunkConfig(x_shard_factor=0))
-    with pytest.raises(ValueError, match="x_shard_factor must be >= 1"):
+    cfg = AppConfig(chunks=ChunkConfig(shard_factor=0))
+    with pytest.raises(ValueError, match="shard_factor must be >= 1"):
         _validate_config(cfg)
 
 
@@ -463,25 +463,25 @@ def test_parallel_write_roundtrip_inmem_and_concat_seam(tmp_path: Path) -> None:
     (200 + 300 rows at row_chunk 64 puts the second file at a misaligned offset, 200 % 64 != 0;
     200 cols/chunk make the seam-chunk RMW window wide enough that lock=False corrupts
     reliably, verified 6/6, so this is a real guard, not a coin flip)."""
-    for x_storage in ("dense", "csr"):
-        src = _rand_h5ad(tmp_path / f"in_{x_storage}.h5ad", n_obs=300, n_vars=200, seed=1)
-        out = tmp_path / f"out_{x_storage}.zarr"
+    for layout in ("dense", "csr"):
+        src = _rand_h5ad(tmp_path / f"in_{layout}.h5ad", n_obs=300, n_vars=200, seed=1)
+        out = tmp_path / f"out_{layout}.zarr"
         cfg = AppConfig(
-            io=IOConfig(overwrite=True, x_storage=x_storage),
-            chunks=ChunkConfig(x_row_chunk=64, x_col_chunk=200, sparse_flat_chunk=500, cpus=4),
+            io=IOConfig(overwrite=True, layout=layout),
+            chunks=ChunkConfig(row_chunk=64, col_chunk=200, nnz_chunk=500, cpus=4),
         )
-        convert_h5ad(str(tmp_path / f"in_{x_storage}.h5ad"), output=str(out), cfg=cfg)
+        convert_h5ad(str(tmp_path / f"in_{layout}.h5ad"), output=str(out), cfg=cfg)
         assert np.array_equal(_read_X(out), src)
 
-    for x_storage in ("dense", "csr"):
-        a = _rand_h5ad(tmp_path / f"a_{x_storage}.h5ad", n_obs=200, n_vars=500, seed=1)
-        b = _rand_h5ad(tmp_path / f"b_{x_storage}.h5ad", n_obs=300, n_vars=500, seed=2)
-        out = tmp_path / f"concat_{x_storage}.zarr"
+    for layout in ("dense", "csr"):
+        a = _rand_h5ad(tmp_path / f"a_{layout}.h5ad", n_obs=200, n_vars=500, seed=1)
+        b = _rand_h5ad(tmp_path / f"b_{layout}.h5ad", n_obs=300, n_vars=500, seed=2)
+        out = tmp_path / f"concat_{layout}.zarr"
         cfg = AppConfig(
-            io=IOConfig(overwrite=True, x_storage=x_storage),
-            chunks=ChunkConfig(x_row_chunk=64, x_col_chunk=500, sparse_flat_chunk=500, cpus=4),
+            io=IOConfig(overwrite=True, layout=layout),
+            chunks=ChunkConfig(row_chunk=64, col_chunk=500, nnz_chunk=500, cpus=4),
         )
-        concat([str(tmp_path / f"a_{x_storage}.h5ad"), str(tmp_path / f"b_{x_storage}.h5ad")], output=str(out), cfg=cfg)
+        concat([str(tmp_path / f"a_{layout}.h5ad"), str(tmp_path / f"b_{layout}.h5ad")], output=str(out), cfg=cfg)
         assert np.array_equal(_read_X(out), np.vstack([a, b]))
 
 
@@ -496,8 +496,8 @@ def test_concat_lazy_csc_input_streams_without_materializing(tmp_path: Path) -> 
 
     out = tmp_path / "out.zarr"
     cfg = AppConfig(
-        io=IOConfig(overwrite=True, x_storage="csr", lazy=True),
-        chunks=ChunkConfig(x_row_chunk=16, x_col_chunk=40, sparse_flat_chunk=500),
+        io=IOConfig(overwrite=True, layout="csr", lazy=True),
+        chunks=ChunkConfig(row_chunk=16, col_chunk=40, nnz_chunk=500),
     )
     concat([str(tmp_path / "a.h5ad"), str(tmp_path / "b.h5ad")], output=str(out), cfg=cfg)
     assert np.array_equal(_read_X(out), np.vstack([a, b]))
@@ -547,7 +547,7 @@ def test_concat_obs_columns_projects_and_warns(tmp_path: Path, caplog) -> None:
     _plain_obs_h5ad(tmp_path / "b.h5ad", 4, "qc_b", np.arange(4, dtype="float64"))
     out = tmp_path / "out.zarr"
     cfg = AppConfig(
-        io=IOConfig(overwrite=True, x_storage="csr"),
+        io=IOConfig(overwrite=True, layout="csr"),
         chunks=_chunks(),
         concat=ConcatConfig(obs_columns=("cell_type", "donor", "score")),
     )
@@ -565,7 +565,7 @@ def test_concat_obs_columns_missing_or_categorical_mismatch_raises(tmp_path: Pat
     _obs_cols_h5ad(tmp_path / "a.h5ad", 6, ["Tcell", "Bcell"], "qc_a")
     _obs_cols_h5ad(tmp_path / "b.h5ad", 4, ["Tcell", "Bcell"], "qc_b")
     cfg_missing = AppConfig(
-        io=IOConfig(overwrite=True, x_storage="csr"),
+        io=IOConfig(overwrite=True, layout="csr"),
         chunks=_chunks(),
         concat=ConcatConfig(obs_columns=("cell_type", "qc_a")),  # qc_a exists only in a.h5ad
     )
@@ -577,7 +577,7 @@ def test_concat_obs_columns_missing_or_categorical_mismatch_raises(tmp_path: Pat
     _obs_cols_h5ad(tmp_path / "c.h5ad", 6, ["Tcell", "Bcell"], "qc_c")
     _obs_cols_h5ad(tmp_path / "d.h5ad", 4, ["Bcell", "NK"], "qc_d")  # different category set
     cfg_mismatch = AppConfig(
-        io=IOConfig(overwrite=True, x_storage="csr"),
+        io=IOConfig(overwrite=True, layout="csr"),
         chunks=_chunks(),
         concat=ConcatConfig(obs_columns=("cell_type", "donor")),
     )
@@ -592,7 +592,7 @@ def test_concat_obs_columns_categorical_match_ok(tmp_path: Path) -> None:
     _obs_cols_h5ad(tmp_path / "b.h5ad", 4, ["Tcell", "Bcell", "NK"], "qc_b")  # same categories
     out = tmp_path / "out.zarr"
     cfg = AppConfig(
-        io=IOConfig(overwrite=True, x_storage="csr"),
+        io=IOConfig(overwrite=True, layout="csr"),
         chunks=_chunks(),
         concat=ConcatConfig(obs_columns=("cell_type", "donor")),
     )
@@ -608,7 +608,7 @@ def test_concat_default_strict_rejects_mismatched_obs(tmp_path: Path) -> None:
     _obs_cols_h5ad(tmp_path / "a.h5ad", 6, ["Tcell", "Bcell"], "qc_a")
     _obs_cols_h5ad(tmp_path / "b.h5ad", 4, ["Tcell", "Bcell"], "qc_b")  # different extra col name
     cfg = AppConfig(
-        io=IOConfig(overwrite=True, x_storage="csr"),
+        io=IOConfig(overwrite=True, layout="csr"),
         chunks=_chunks(),
     )
     with pytest.raises(ConversionError, match="obs schema mismatch"):

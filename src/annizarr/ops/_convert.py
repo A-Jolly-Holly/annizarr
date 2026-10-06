@@ -12,7 +12,7 @@ import anndata as ad
 from annizarr._core._config import AppConfig, resolve_backend_cfg
 from annizarr._core._runtime import configure_runtime
 from annizarr._core._sorting import _write_sorted_lazy, maybe_sort_adata
-from annizarr._core._validation import validate_single_cell_anndata
+from annizarr._core._validation import require_matrix
 from annizarr._sources import close_lazy_if_needed, detect_format, load_10x_h5, load_h5ad, open_source
 from annizarr._storage import check_output_target, open_output_store, store_name
 from annizarr._writers import write_adata
@@ -48,14 +48,12 @@ def write_adata_to_store(
     elif cfg.grouping.enabled:
         raise ConversionError("grouping (sort_by) is only supported by convert for now.")
 
-    validation_result = validate_single_cell_anndata(adata)
-    for w in validation_result.warnings:
-        logger.warning(w)
+    require_matrix(adata)
     ad.settings.zarr_write_format = 3
 
     logger.info(
         f"Converting → {output_path} (n_obs={adata.n_obs}, n_vars={adata.n_vars}, "
-        f"{cfg.io.x_storage}, backend={cfg.io.backend})"
+        f"{cfg.io.layout}, backend={cfg.io.backend})"
     )
     t0 = time.perf_counter()
     commit_message = message or f"annizarr convert → {store_name(output_path)}"

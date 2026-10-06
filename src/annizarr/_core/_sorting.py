@@ -14,7 +14,7 @@ import scipy.sparse as sp
 import zarr
 
 from annizarr._core._runtime import configure_runtime, stage
-from annizarr._core._validation import validate_single_cell_anndata
+from annizarr._core._validation import require_matrix
 from annizarr._core._zarr import get_array
 from annizarr._sources._readers import ConcatReader, CSRZarrReader, as_reader
 from annizarr._storage import open_output_store
@@ -60,8 +60,8 @@ def maybe_sort_adata(adata: ad.AnnData, cfg: AppConfig) -> ad.AnnData:
         return adata
 
     sort_by = cfg.grouping.sort_by
-    if cfg.io.x_storage not in ("csr", "dense"):
-        raise ConversionError(f"grouping (sort_by) requires x_storage='csr' or 'dense'; got '{cfg.io.x_storage}'.")
+    if cfg.io.layout not in ("csr", "dense"):
+        raise ConversionError(f"grouping (sort_by) requires layout='csr' or 'dense'; got '{cfg.io.layout}'.")
     if cfg.io.lazy:
         raise ConversionError(
             "grouping (sort_by) requires an eager (in-memory) load; not supported with --lazy yet. Omit --lazy to sort."
@@ -83,9 +83,9 @@ def _write_sorted_lazy(
 ) -> str | None:
     # streams X into temp per-group CSR stores (peak RAM one row-batch), unlike
     # maybe_sort_adata's adata[perm].copy() (~2x X in RAM).
-    if cfg.io.x_storage != "csr":
+    if cfg.io.layout != "csr":
         raise ConversionError(
-            f"lazy --sort-by supports x_storage='csr' only (got '{cfg.io.x_storage}'). "
+            f"lazy --sort-by supports layout='csr' only (got '{cfg.io.layout}'). "
             "Pass --eager to sort dense/CSC in memory."
         )
     if adata.layers or adata.raw is not None or len(adata.obsp) > 0:
@@ -100,9 +100,7 @@ def _write_sorted_lazy(
             f"lazy --sort-by requires the lazy input's X to be CSR on disk; got {got}. Pass --eager to sort in memory."
         )
 
-    validation_result = validate_single_cell_anndata(adata)
-    for w in validation_result.warnings:
-        logger.warning(w)
+    require_matrix(adata)
     sort_by = cfg.grouping.sort_by
     snapshot_id = stream_sorted_store(
         x,

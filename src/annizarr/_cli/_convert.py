@@ -13,6 +13,7 @@ from annizarr._cli._args import (
     add_message_arg,
     add_overwrite_arg,
     build_config,
+    reject_off_axis_chunks,
 )
 from annizarr._core._config import IOConfig
 
@@ -42,9 +43,9 @@ def add_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) 
         help="load the whole input into memory first; faster for small files (default: stream it band by band)",
     )
     p.add_argument(
-        "--x-storage",
+        "--layout",
         choices=("csr", "csc", "dense"),
-        help=f"output X layout (default: {IOConfig().x_storage})",
+        help=f"output X layout (default: {IOConfig().layout})",
     )
     add_cpus_arg(p)
     add_chunk_args(p)
@@ -78,6 +79,7 @@ def _run(args: argparse.Namespace) -> int:
         args._parser.error("--obs-columns requires at least two inputs")
 
     cfg = build_config(args)
+    reject_off_axis_chunks(args._parser, args, cfg.io.layout)
     result = convert(args.inputs, output=args.output, cfg=cfg, fmt=args.from_, branch=args.branch, message=args.message)
     _LOG.info(f"wrote {result.path} ({result.n_obs} x {result.n_vars})")
     if result.snapshot_id is not None:

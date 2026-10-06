@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 from annizarr._core._config import AppConfig, resolve_backend_cfg
 from annizarr._core._runtime import configure_runtime, stage
-from annizarr._core._validation import validate_single_cell_anndata
+from annizarr._core._validation import require_matrix
 from annizarr._sources import open_source
 from annizarr._sources._readers import ConcatReader, as_reader
 from annizarr._storage import check_output_target, open_output_store, store_name
@@ -127,8 +127,8 @@ def concat(
                         f"got {list(a.obs.columns)}."
                     )
 
-        for i, a in enumerate(adatas):
-            _validate_and_warn(a, cfg, labels[i])
+        for a in adatas:
+            require_matrix(a)
 
         n_obs_each = [a.n_obs for a in adatas]
         n_obs_total = sum(n_obs_each)
@@ -144,8 +144,7 @@ def concat(
             obs_concat = pd.concat([a.obs for a in adatas], axis=0)
 
         logger.info(
-            f"Concatenating {len(paths)} inputs → {output_path} "
-            f"(n_obs={n_obs_total}, n_vars={n_vars}, {cfg.io.x_storage})"
+            f"Concatenating {len(paths)} inputs → {output_path} (n_obs={n_obs_total}, n_vars={n_vars}, {cfg.io.layout})"
         )
         t0 = time.perf_counter()
 
@@ -171,7 +170,7 @@ def concat(
                         write_elem(out.root, "varp", {})
 
                     concat_reader = ConcatReader(readers)
-                    with stage(f"Writing X (n_obs={n_obs_total}, n_vars={n_vars}, {cfg.io.x_storage})"):
+                    with stage(f"Writing X (n_obs={n_obs_total}, n_vars={n_vars}, {cfg.io.layout})"):
                         write_matrix(out.root, "X", concat_reader, cfg)
             finally:
                 # close (and clean up any lazy-CSC temp dir) BEFORE finalize's atomic swap, so a
@@ -194,9 +193,3 @@ def concat(
     finally:
         for s in sources:
             s.close()
-
-
-def _validate_and_warn(adata: ad.AnnData, cfg: AppConfig, label: str) -> None:
-    result = validate_single_cell_anndata(adata)
-    for w in result.warnings:
-        logger.warning(f"[{label}] {w}")

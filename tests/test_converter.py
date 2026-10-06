@@ -18,24 +18,29 @@ from annizarr.ops import convert_10x_h5, convert_adata, convert_h5ad
 # Helpers
 # ---------------------------------------------------------------------------
 #
-# The core (input format x lazy x x_storage) dispatch grid lives in test_convert_matrix.py,
+# The core (input format x lazy x layout) dispatch grid lives in test_convert_matrix.py,
 # via the shared Reader abstraction every input now goes through. What's left here is
 # behaviour outside that grid: the 10x loader, the existing-target fast-fail + flat-chunk
 # sizing, convert_adata's own lazy-sync, and the lazy-CSC temp-dir cleanup + the lazy ->
 # backed="r" regression guard.
 
 
-def _cfg(x_storage: str, sparse_flat_chunk: int = 2048) -> AppConfig:
+def _chunks(layout: str, nnz_chunk: int = 2048) -> ChunkConfig:
+    # axis chunks only for dense: on sparse output they size the flat chunk by cells/genes instead
+    return ChunkConfig(row_chunk=2, col_chunk=2) if layout == "dense" else ChunkConfig(nnz_chunk=nnz_chunk)
+
+
+def _cfg(layout: str, nnz_chunk: int = 2048) -> AppConfig:
     return AppConfig(
-        io=IOConfig(overwrite=False, consolidate_metadata=False, x_storage=x_storage),
-        chunks=ChunkConfig(x_row_chunk=2, x_col_chunk=2, sparse_flat_chunk=sparse_flat_chunk),
+        io=IOConfig(overwrite=False, consolidate_metadata=False, layout=layout),
+        chunks=_chunks(layout, nnz_chunk),
     )
 
 
-def _cfg_lazy(x_storage: str) -> AppConfig:
+def _cfg_lazy(layout: str) -> AppConfig:
     return AppConfig(
-        io=IOConfig(overwrite=False, consolidate_metadata=False, x_storage=x_storage, lazy=True),
-        chunks=ChunkConfig(x_row_chunk=2, x_col_chunk=2, sparse_flat_chunk=2048),
+        io=IOConfig(overwrite=False, consolidate_metadata=False, layout=layout, lazy=True),
+        chunks=_chunks(layout),
     )
 
 
@@ -132,15 +137,13 @@ def test_convert_h5ad_existing_target_fails_before_loading_and_flat_chunk_applie
 
     _make_large_h5ad(tmp_path / "csr_input.h5ad")
     convert_h5ad(
-        str(tmp_path / "csr_input.h5ad"), output=str(tmp_path / "csr_out.zarr"), cfg=_cfg("csr", sparse_flat_chunk=100)
+        str(tmp_path / "csr_input.h5ad"), output=str(tmp_path / "csr_out.zarr"), cfg=_cfg("csr", nnz_chunk=100)
     )
     assert _flat_chunks(tmp_path / "csr_out.zarr", "X") == (100,)
     assert _flat_chunks(tmp_path / "csr_out.zarr", "layers/counts") == (100,)
 
     _make_large_h5ad(tmp_path / "csc_input.h5ad")
-    convert_h5ad(
-        str(tmp_path / "csc_input.h5ad"), output=str(tmp_path / "csc_out.zarr"), cfg=_cfg("csc", sparse_flat_chunk=75)
-    )
+    convert_h5ad(str(tmp_path / "csc_input.h5ad"), output=str(tmp_path / "csc_out.zarr"), cfg=_cfg("csc", nnz_chunk=75))
     assert _flat_chunks(tmp_path / "csc_out.zarr", "X") == (75,)
     assert _flat_chunks(tmp_path / "csc_out.zarr", "layers/counts") == (75,)
 
@@ -175,7 +178,7 @@ def test_convert_adata_accepts_a_backed_anndata(tmp_path: Path) -> None:
     adata = ad.read_h5ad(h5, backed="r")
     try:
         out_dense = tmp_path / "out_dense.zarr"
-        convert_adata(adata, output=str(out_dense), cfg=AppConfig(io=IOConfig(x_storage="dense")))
+        convert_adata(adata, output=str(out_dense), cfg=AppConfig(io=IOConfig(layout="dense")))
         np.testing.assert_array_equal(zarr.open(str(out_dense), mode="r")["X"][:], dense)
     finally:
         adata.file.close()
@@ -200,16 +203,16 @@ def _make_300x200_h5ad(path: Path, *, x_csc: bool) -> None:
 
 def test_h5ad_lazy_csc_to_dense_matches_eager_no_tmp_dir_left(tmp_path: Path) -> None:
     """A lazy CSC source (X, or the 'cnt' layer -- both directions checked) converted with
-    x_storage='dense' streams through a temporary CSC->CSR transpose (never materialising the
+    layout='dense' streams through a temporary CSC->CSR transpose (never materialising the
     whole matrix) and matches the eager (in-memory) conversion byte-for-byte; the temp dir is
     cleaned up either way. Also the only regression guard that lazy actually causes a
     backed="r" load (an output-format-only assertion wouldn't catch a silently-ignored flag,
     since a small fixture converts identically either way)."""
     # chunks sized for the 300x200 fixture (not a 2x2 default, which would tile it into
     # thousands of tiny writes)
-    chunks = ChunkConfig(x_row_chunk=64, x_col_chunk=64)
+    chunks = ChunkConfig(row_chunk=64, col_chunk=64)
     for x_csc in (False, True):
-        cfg_eager = AppConfig(io=IOConfig(x_storage="dense", lazy=False), chunks=chunks)
+        cfg_eager = AppConfig(io=IOConfig(layout="dense", lazy=False), chunks=chunks)
         cfg_lazy = replace(cfg_eager, io=replace(cfg_eager.io, lazy=True))
 
         input_h5 = tmp_path / f"input_{x_csc}.h5ad"

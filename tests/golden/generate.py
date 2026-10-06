@@ -157,17 +157,17 @@ CASES: dict[str, dict[str, Any]] = {
 
 
 def _build_cfg(case: dict[str, Any]) -> Any:
-    # case.json keeps the "backed" key name (matches the already-packed tarballs' schema,
-    # read back by test_golden_writers.py); map it onto apply_cli_overrides(lazy=) here.
+    # case.json keeps the pre-rename key names ("backed", "x_storage", "x_row_chunk", ...) so the
+    # already-packed tarballs stay valid; map them onto today's kwargs here.
     return apply_cli_overrides(
         AppConfig(),
-        x_storage=case["x_storage"],
+        layout=case["x_storage"],
         lazy=case.get("backed", False),
         cpus=case.get("cpus"),
-        x_row_chunk=case.get("x_row_chunk"),
-        x_col_chunk=case.get("x_col_chunk"),
-        sparse_flat_chunk=case.get("sparse_flat_chunk"),
-        x_shard_factor=case.get("x_shard_factor"),
+        row_chunk=case.get("x_row_chunk"),
+        col_chunk=case.get("x_col_chunk"),
+        nnz_chunk=case.get("sparse_flat_chunk"),
+        shard_factor=case.get("x_shard_factor"),
         auto_shard=case.get("auto_shard", False),
         sort_by=case.get("sort_by"),
     )

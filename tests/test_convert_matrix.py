@@ -15,7 +15,7 @@ from annizarr.config import AppConfig, ChunkConfig, IOConfig
 from annizarr.ops import convert_h5ad
 
 # A 60x40 float32 fixture with two fully-empty rows and one fully-empty column, so the
-# (format x lazy x x_storage) grid below exercises a reader's indptr/band/flat math on real
+# (format x lazy x layout) grid below exercises a reader's indptr/band/flat math on real
 # sparsity, not just a dense-everywhere matrix.
 N_OBS, N_VARS = 60, 40
 
@@ -93,14 +93,14 @@ def _getitem_recorder(monkeypatch: pytest.MonkeyPatch) -> _GetitemRecorder:
 
 @pytest.mark.parametrize("input_format", ["dense", "csr", "csc"])
 @pytest.mark.parametrize("lazy", [False, True])
-@pytest.mark.parametrize("x_storage", ["dense", "csr", "csc"])
+@pytest.mark.parametrize("layout", ["dense", "csr", "csc"])
 def test_convert_matrix_grid(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     _getitem_recorder: _GetitemRecorder,
     input_format: str,
     lazy: bool,
-    x_storage: str,
+    layout: str,
 ) -> None:
     monkeypatch.setattr(_layout, "BATCH_BYTES", 512)  # forces real banding on this small fixture
 
@@ -110,8 +110,8 @@ def test_convert_matrix_grid(
     # cpus=1 pinned: a lazy conversion fans out across worker processes by default (item 2),
     # and the h5py read recorder below only patches __getitem__ in THIS process.
     cfg = AppConfig(
-        io=IOConfig(x_storage=x_storage, lazy=lazy),
-        chunks=ChunkConfig(x_row_chunk=7, x_col_chunk=6, sparse_flat_chunk=11, cpus=1),
+        io=IOConfig(layout=layout, lazy=lazy),
+        chunks=ChunkConfig(row_chunk=7, col_chunk=6, nnz_chunk=11, cpus=1),
     )
     convert_h5ad(str(input_h5), output=str(out), cfg=cfg)
 
@@ -120,7 +120,7 @@ def test_convert_matrix_grid(
     np.testing.assert_array_equal(got_dense, DENSE)
 
     root = zarr.open_group(str(out), mode="r")
-    assert root["X"].attrs["encoding-type"] == _ENCODING[x_storage]
+    assert root["X"].attrs["encoding-type"] == _ENCODING[layout]
     assert root["X"].attrs["encoding-version"]
 
     if lazy:
@@ -132,13 +132,13 @@ def test_convert_matrix_grid(
             assert len(calls) > 1, f"expected several bounded reads of {name!r}, got {calls}"
             bounded = [count < total for count, total in calls]
             # write_transposed_sparse (the CSC writer, or as_reader's lazy-CSC-to-CSR
-            # normalisation) runs whenever x_storage=="csc" or the input itself is CSC. Its
+            # normalisation) runs whenever layout=="csc" or the input itself is CSC. Its
             # own nnz-counting pass is genuinely banded (several of these calls are partial,
             # proven by `any` below); its final per-band assembly pass uses a
             # `max(1_000, ...)` row-count floor (pre-existing, shared with the old bucket
             # engine, not specific to this refactor) that reads everything in one shot once
             # the input is under ~1000 rows, as this fixture deliberately is.
-            uses_transpose_engine = x_storage == "csc" or input_format == "csc"
+            uses_transpose_engine = layout == "csc" or input_format == "csc"
             if uses_transpose_engine:
                 assert any(bounded), f"expected at least one bounded read of {name!r}, got {calls}"
             else:

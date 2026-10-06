@@ -8,13 +8,16 @@ from typing import TYPE_CHECKING, Literal
 from annizarr.errors import ValidationError
 
 if TYPE_CHECKING:
-    from annizarr.typing import XStorage
+    from annizarr.typing import Layout
 
 logger = logging.getLogger(__name__)
 
 BackendMode = Literal["zarr", "icechunk"]
 
+DENSE_CHUNK = 2048  # rows and columns per chunk for dense X when row_chunk/col_chunk are unset
+
 __all__ = [
+    "DENSE_CHUNK",
     "AppConfig",
     "ChunkConfig",
     "ConcatConfig",
@@ -34,7 +37,7 @@ class IOConfig:
         Replace an existing output path/store instead of erroring.
     consolidate_metadata
         Consolidate zarr metadata into one object after writing (plain zarr only).
-    x_storage
+    layout
         On-disk layout for X (and layers): ``"csr"``, ``"csc"``, or ``"dense"``.
     lazy
         Load h5ad input in lazy (HDF5-streamed) mode instead of eagerly. ``True`` (the
@@ -48,7 +51,7 @@ class IOConfig:
 
     overwrite: bool = False
     consolidate_metadata: bool = False
-    x_storage: XStorage = "csr"
+    layout: Layout = "csr"
     lazy: bool = True
     backend: BackendMode = "zarr"
 
@@ -63,18 +66,24 @@ class ChunkConfig:
 
     Parameters
     ----------
-    x_row_chunk
-        Row chunk size for X (dense row axis; CSR major axis granularity).
-    x_col_chunk
-        Column chunk size for dense X.
-    sparse_flat_chunk
-        Flat chunk size for sparse X ``data``/``indices``.
+    row_chunk
+        Rows per chunk. Exact for dense X (``DENSE_CHUNK`` when unset); for CSR output,
+        about this many cells' worth of nonzeros per ``data``/``indices`` chunk, sized
+        from the average nonzeros per row. ``None`` (the default) leaves CSR chunking to
+        ``nnz_chunk``. Ignored for CSC.
+    col_chunk
+        Columns per chunk. Exact for dense X (``DENSE_CHUNK`` when unset); for CSC output,
+        about this many genes' worth of nonzeros per chunk. ``None`` (the default) leaves
+        CSC chunking to ``nnz_chunk``. Ignored for CSR.
+    nnz_chunk
+        Flat ``data``/``indices`` chunk length (nonzeros) for sparse output when the
+        matching axis chunk above is unset.
     cpus
         Workers for parallel matrix chunk writes: threads for a thread-safe reader
         (in-memory or zarr-backed), processes for a lazy h5py-backed one (not thread-safe).
         Defaults to every available CPU core (``os.cpu_count()``); pass a lower number to
         leave headroom on a shared/HPC host.
-    x_shard_factor
+    shard_factor
         Pack this many chunks per shard along each axis of dense X (``1`` = no
         sharding; sparse output ignores it). See :func:`annizarr._core._layout.dense_shards`.
     auto_shard
@@ -84,17 +93,17 @@ class ChunkConfig:
         (obs/var columns, obsm, uns, …), so anndata's own writes are auto-sharded too.
         Cuts object/file count on remote or many-small-chunk stores at a small write-time
         cost (see :func:`annizarr._writers._encoding.sparse_shards`). Dense X is unaffected
-        — it keeps the explicit ``x_shard_factor`` above, never ``shards="auto"``. Default
+        — it keeps the explicit ``shard_factor`` above, never ``shards="auto"``. Default
         chosen from a read-latency benchmark (see
         ``benchmarking_results/autoshard/README.md``); ``False`` reproduces the pre-autoshard
         on-disk layout exactly.
     """
 
-    x_row_chunk: int = 2048
-    x_col_chunk: int = 2048
-    sparse_flat_chunk: int = 1_000_000
+    row_chunk: int | None = None
+    col_chunk: int | None = None
+    nnz_chunk: int = 1_000_000
     cpus: int = field(default_factory=_all_cpus)
-    x_shard_factor: int = 1
+    shard_factor: int = 1
     auto_shard: bool = False
 
 
@@ -135,13 +144,13 @@ class AppConfig:
     concat: ConcatConfig = ConcatConfig()
 
 
-def _normalize_x_storage(value: str) -> XStorage:
+def _normalize_layout(value: str) -> Layout:
     mode = value.lower().strip()
     allowed = {"csr", "csc", "dense"}
     if mode not in allowed:
         allowed_list = ", ".join(sorted(allowed))
-        raise ValidationError(f"Invalid io.x_storage '{value}'. Expected one of: {allowed_list}")
-    return mode  # type: ignore[return-value]  # mode is in `allowed`, a subset of XStorage's literals
+        raise ValidationError(f"Invalid io.layout '{value}'. Expected one of: {allowed_list}")
+    return mode  # type: ignore[return-value]  # mode is in `allowed`, a subset of Layout's literals
 
 
 def _normalize_backend(value: str) -> BackendMode:
@@ -156,7 +165,7 @@ def _normalize_backend(value: str) -> BackendMode:
 def _validate_config(config: AppConfig) -> AppConfig:
     io = replace(
         config.io,
-        x_storage=_normalize_x_storage(config.io.x_storage),
+        layout=_normalize_layout(config.io.layout),
         backend=_normalize_backend(config.io.backend),
     )
     sort_by = config.grouping.sort_by  # may arrive as a list or bare string; freeze to a tuple
@@ -169,10 +178,14 @@ def _validate_config(config: AppConfig) -> AppConfig:
     if isinstance(obs_columns, str):
         obs_columns = (obs_columns,)
     concat = replace(config.concat, obs_columns=tuple(obs_columns))
-    if config.chunks.x_shard_factor < 1:
-        raise ValidationError(
-            f"chunks.x_shard_factor must be >= 1 (1 = no sharding); got {config.chunks.x_shard_factor}."
-        )
+    for name in ("row_chunk", "col_chunk"):
+        axis_chunk = getattr(config.chunks, name)
+        if axis_chunk is not None and axis_chunk < 1:
+            raise ValidationError(f"chunks.{name} must be >= 1; got {axis_chunk}.")
+    if config.chunks.nnz_chunk < 1:
+        raise ValidationError(f"chunks.nnz_chunk must be >= 1; got {config.chunks.nnz_chunk}.")
+    if config.chunks.shard_factor < 1:
+        raise ValidationError(f"chunks.shard_factor must be >= 1 (1 = no sharding); got {config.chunks.shard_factor}.")
     return replace(config, io=io, grouping=grouping, concat=concat)
 
 
@@ -181,11 +194,11 @@ def apply_cli_overrides(
     *,
     overwrite: bool | None = None,
     consolidate_metadata: bool | None = None,
-    x_storage: str | None = None,
-    x_row_chunk: int | None = None,
-    x_col_chunk: int | None = None,
-    sparse_flat_chunk: int | None = None,
-    x_shard_factor: int | None = None,
+    layout: str | None = None,
+    row_chunk: int | None = None,
+    col_chunk: int | None = None,
+    nnz_chunk: int | None = None,
+    shard_factor: int | None = None,
     auto_shard: bool | None = None,
     cpus: int | None = None,
     lazy: bool | None = None,
@@ -203,22 +216,22 @@ def apply_cli_overrides(
         io_cfg = replace(io_cfg, overwrite=overwrite)
     if consolidate_metadata is not None:
         io_cfg = replace(io_cfg, consolidate_metadata=consolidate_metadata)
-    if x_storage is not None:
-        io_cfg = replace(io_cfg, x_storage=_normalize_x_storage(x_storage))
+    if layout is not None:
+        io_cfg = replace(io_cfg, layout=_normalize_layout(layout))
     # None means "don't touch it": --eager is the only lazy flag and defaults to None, so
     # io.lazy keeps its own default unless the flag is actually passed.
     if lazy is not None:
         io_cfg = replace(io_cfg, lazy=lazy)
     if backend is not None:
         io_cfg = replace(io_cfg, backend=_normalize_backend(backend))
-    if x_row_chunk is not None:
-        chunk_cfg = replace(chunk_cfg, x_row_chunk=x_row_chunk)
-    if x_col_chunk is not None:
-        chunk_cfg = replace(chunk_cfg, x_col_chunk=x_col_chunk)
-    if sparse_flat_chunk is not None:
-        chunk_cfg = replace(chunk_cfg, sparse_flat_chunk=sparse_flat_chunk)
-    if x_shard_factor is not None:
-        chunk_cfg = replace(chunk_cfg, x_shard_factor=x_shard_factor)
+    if row_chunk is not None:
+        chunk_cfg = replace(chunk_cfg, row_chunk=row_chunk)
+    if col_chunk is not None:
+        chunk_cfg = replace(chunk_cfg, col_chunk=col_chunk)
+    if nnz_chunk is not None:
+        chunk_cfg = replace(chunk_cfg, nnz_chunk=nnz_chunk)
+    if shard_factor is not None:
+        chunk_cfg = replace(chunk_cfg, shard_factor=shard_factor)
     if auto_shard is not None:
         chunk_cfg = replace(chunk_cfg, auto_shard=auto_shard)
     if cpus is not None:
@@ -235,9 +248,9 @@ def resolve_backend_cfg(cfg: AppConfig) -> AppConfig:
     # lazy (io.lazy=True, the default) works into every backend: a lazy, not-thread-safe
     # reader feeding a non-local store (e.g. an Icechunk session) runs the read-ahead
     # pipeline instead of threads/processes (see writer_parallel_mode).
-    if cfg.chunks.x_shard_factor > 1 and cfg.io.x_storage != "dense":
+    if cfg.chunks.shard_factor > 1 and cfg.io.layout != "dense":
         logger.warning(
-            f"x_shard_factor={cfg.chunks.x_shard_factor} only applies to dense X; "
-            f"x_storage={cfg.io.x_storage!r} is sparse, so sharding is ignored."
+            f"shard_factor={cfg.chunks.shard_factor} only applies to dense X; "
+            f"layout={cfg.io.layout!r} is sparse, so sharding is ignored."
         )
     return cfg

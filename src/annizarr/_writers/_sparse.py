@@ -111,7 +111,7 @@ def _write_compressed(
     indices_dtype = np.int32  # matches scipy's default; values fit unless > 2^31 along the minor axis
 
     sp_group = make_sparse_group(group, key, csr=csr, shape=shape)
-    flat_chunk = min(cfg.chunks.sparse_flat_chunk, max(1, nnz_total))
+    flat_chunk = _layout.sparse_flat_chunk(cfg.chunks, csr=csr, nnz=nnz_total, n_major=n_major)
     shards = sparse_shards(cfg.chunks.auto_shard)
     with suppress_autoshard_warning(cfg.chunks.auto_shard):
         data_arr = sp_group.require_array(
@@ -203,7 +203,7 @@ def write_transposed_sparse(
     indptr_dtype = np.int64 if nnz > np.iinfo(np.int32).max else np.int32
 
     target_nnz = np.zeros(n_target_major, dtype=np.int64)
-    flat_step = max(cfg.chunks.sparse_flat_chunk, _layout.BATCH_BYTES // 8)
+    flat_step = max(cfg.chunks.nnz_chunk, _layout.BATCH_BYTES // 8)
     for s0 in range(0, nnz, flat_step):
         s1 = min(s0 + flat_step, nnz)
         _, idx = reader.flat(s0, s1)
@@ -266,7 +266,7 @@ def write_transposed_sparse(
             tick()
 
         sp_group = make_sparse_group(group, key, csr=(target == "csr"), shape=true_shape)
-        flat_chunk = min(cfg.chunks.sparse_flat_chunk, max(1, nnz))
+        flat_chunk = _layout.sparse_flat_chunk(cfg.chunks, csr=(target == "csr"), nnz=nnz, n_major=n_target_major)
         shards = sparse_shards(cfg.chunks.auto_shard)
         with suppress_autoshard_warning(cfg.chunks.auto_shard):
             data_arr = sp_group.require_array(

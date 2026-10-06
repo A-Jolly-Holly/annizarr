@@ -65,9 +65,8 @@ def _dense_pipeline_produce(reader: Reader, r0: int, r1: int, c0: int, c1: int) 
 
 def write_dense(group: zarr.Group, key: str, reader: Reader, cfg: AppConfig) -> None:
     n_rows, n_cols = reader.shape
-    row_chunk = min(cfg.chunks.x_row_chunk, n_rows)
-    col_chunk = min(cfg.chunks.x_col_chunk, n_cols)
-    layout = dense_shards(row_chunk, col_chunk, n_rows, n_cols, cfg.chunks.x_shard_factor)
+    row_chunk, col_chunk = _layout.dense_chunks(cfg.chunks, n_rows, n_cols)
+    layout = dense_shards(row_chunk, col_chunk, n_rows, n_cols, cfg.chunks.shard_factor)
 
     zarr_arr = group.require_array(
         key,

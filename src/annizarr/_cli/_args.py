@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 
-from annizarr._core._config import AppConfig, ChunkConfig, apply_cli_overrides
+from annizarr._core._config import DENSE_CHUNK, AppConfig, ChunkConfig, apply_cli_overrides
 
 
 def add_overwrite_arg(parser: argparse.ArgumentParser) -> None:
@@ -46,20 +46,20 @@ def add_cpus_arg(parser: argparse.ArgumentParser) -> None:
 
 
 def add_chunk_args(parser: argparse.ArgumentParser) -> None:
-    defaults = ChunkConfig()
-    parser.add_argument("--x-row-chunk", type=int, help=f"row chunk size for X (default: {defaults.x_row_chunk})")
+    nnz = ChunkConfig().nnz_chunk
     parser.add_argument(
-        "--x-col-chunk", type=int, help=f"column chunk size for dense X (default: {defaults.x_col_chunk})"
+        "--row-chunk",
+        type=int,
+        metavar="N",
+        help=f"rows per chunk: exact for dense output (default: {DENSE_CHUNK}); for csr, about N cells' worth of "
+        f"nonzeros per chunk (default: {nnz} nonzeros). Not for csc.",
     )
     parser.add_argument(
-        "--sparse-flat-chunk",
+        "--col-chunk",
         type=int,
-        help=f"flat chunk size for sparse X data/indices (default: {defaults.sparse_flat_chunk})",
-    )
-    parser.add_argument(
-        "--x-shard-factor",
-        type=int,
-        help=f"pack this many chunks per shard (dense X only) (default: {defaults.x_shard_factor})",
+        metavar="N",
+        help=f"columns per chunk: exact for dense output (default: {DENSE_CHUNK}); for csc, about N genes' worth of "
+        f"nonzeros per chunk (default: {nnz} nonzeros). Not for csr.",
     )
 
 
@@ -74,6 +74,15 @@ def add_autoshard_arg(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def reject_off_axis_chunks(parser: argparse.ArgumentParser, args: argparse.Namespace, layout: str) -> None:
+    # convert/add-expr know the output layout up front, so a chunk flag for the wrong sparse axis
+    # is a usage error here; rechunk learns the layout from the store and only warns at write time
+    if layout == "csr" and getattr(args, "col_chunk", None) is not None:
+        parser.error("--col-chunk does not apply to csr output (chunks follow rows); use --row-chunk")
+    if layout == "csc" and getattr(args, "row_chunk", None) is not None:
+        parser.error("--row-chunk does not apply to csc output (chunks follow columns); use --col-chunk")
+
+
 def build_config(args: argparse.Namespace) -> AppConfig:
     # overlays whichever override flags the calling subcommand's parser defined onto the
     # defaults; flags absent from args are simply skipped
@@ -81,11 +90,9 @@ def build_config(args: argparse.Namespace) -> AppConfig:
         AppConfig(),
         overwrite=getattr(args, "overwrite", None),
         consolidate_metadata=getattr(args, "consolidate_metadata", None),
-        x_storage=getattr(args, "x_storage", None),
-        x_row_chunk=getattr(args, "x_row_chunk", None),
-        x_col_chunk=getattr(args, "x_col_chunk", None),
-        sparse_flat_chunk=getattr(args, "sparse_flat_chunk", None),
-        x_shard_factor=getattr(args, "x_shard_factor", None),
+        layout=getattr(args, "layout", None),
+        row_chunk=getattr(args, "row_chunk", None),
+        col_chunk=getattr(args, "col_chunk", None),
         auto_shard=getattr(args, "auto_shard", None),
         cpus=getattr(args, "cpus", None),
         lazy=getattr(args, "lazy", None),
