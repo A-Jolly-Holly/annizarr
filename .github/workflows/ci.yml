@@ -1,7 +1,5 @@
-# inert while inside the monorepo (GitHub only runs workflows from the repo root); becomes
-# live after `git filter-repo` splits this directory out into its own repository.
-# Gate on PRs to main for the annizarr package (pip-based; independent of the pixi dev env).
-name: annizarr
+# Gate on PRs to main (pip-based; independent of the pixi dev env).
+name: CI
 
 on:
   pull_request:

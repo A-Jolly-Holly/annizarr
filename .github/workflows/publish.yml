@@ -1,7 +1,5 @@
-# inert while inside the monorepo (GitHub only runs workflows from the repo root); becomes
-# live after `git filter-repo` splits this directory out into its own repository.
-# Manual publish for the annizarr package. workflow_dispatch only for now —
-# switch to `push: tags: ['v*']` after the repo split.
+# Manual publish for the annizarr package. workflow_dispatch only for now;
+# switch to `push: tags: ['v*']` after the first release lands.
 name: annizarr-publish
 
 on:
