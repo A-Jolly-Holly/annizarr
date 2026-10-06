@@ -8,8 +8,6 @@ from annizarr.errors import ValidationError
 if TYPE_CHECKING:
     from anndata import AnnData
 
-    from annizarr._core._config import ValidationConfig
-
 __all__ = ["ValidationResult", "validate_single_cell_anndata"]
 
 
@@ -31,22 +29,22 @@ def _has_spatial_markers(adata: AnnData) -> bool:
     return False
 
 
-def validate_single_cell_anndata(adata: AnnData, cfg: ValidationConfig) -> ValidationResult:
+def validate_single_cell_anndata(adata: AnnData) -> ValidationResult:
+    # non-empty, non-spatial single-cell AnnData with an X; duplicate names only warn
     warnings: list[str] = []
 
-    if cfg.require_non_empty:
-        if adata.n_obs < cfg.min_obs:
-            raise ValidationError(f"AnnData has too few observations: {adata.n_obs} < {cfg.min_obs}")
-        if adata.n_vars < cfg.min_vars:
-            raise ValidationError(f"AnnData has too few variables: {adata.n_vars} < {cfg.min_vars}")
+    if adata.n_obs < 1:
+        raise ValidationError(f"AnnData has too few observations: {adata.n_obs} < 1")
+    if adata.n_vars < 1:
+        raise ValidationError(f"AnnData has too few variables: {adata.n_vars} < 1")
 
     if adata.X is None:
         raise ValidationError("AnnData has no expression matrix in X.")
 
-    if cfg.reject_spatial and _has_spatial_markers(adata):
+    if _has_spatial_markers(adata):
         raise ValidationError(
-            "Input appears spatial (detected spatial markers in uns/obsm), "
-            "but this converter run is configured for non-spatial single-cell AnnData only."
+            "Input appears spatial (detected spatial markers in uns/obsm); "
+            "annizarr handles non-spatial single-cell AnnData only."
         )
 
     if adata.obs_names.has_duplicates:

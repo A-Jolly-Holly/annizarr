@@ -480,9 +480,7 @@ def test_cli_store_ops(tmp_path):
     from annizarr._cli import main as run
 
     out = _store(tmp_path, _adata())
-    cfg_file = tmp_path / "cfg.toml"
-    cfg_file.write_text("[chunks]\nsparse_flat_chunk = 32\n")
-    assert run(["add-expr", str(out), "--chunk-elems", "32", "--config", str(cfg_file)]) == 0
+    assert run(["add-expr", str(out), "--chunk-elems", "32"]) == 0
     assert "gexp" in ad.read_zarr(str(out)).layers
     assert run(["add-expr", str(tmp_path / "missing.zarr")]) == 1
 

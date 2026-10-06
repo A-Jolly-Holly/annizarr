@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING, Any
 
 import zarr
 
-from annizarr._core._config import AppConfig, load_config, resolve_backend_cfg
+from annizarr._core._config import AppConfig, resolve_backend_cfg
 from annizarr._core._layout import dense_shards, write_grid
 from annizarr._core._runtime import configure_runtime, run_parallel, stage
 from annizarr._core._zarr import get_group, shape_attr
@@ -39,7 +39,7 @@ def rechunk(
     array
         The matrix element to rechunk: ``"X"``, ``"layers/<name>"``, or ``"raw/X"``.
     cfg
-        Resolved configuration; ``None`` loads :func:`~annizarr.config.load_config` defaults.
+        Resolved configuration; ``None`` uses the :class:`~annizarr.config.AppConfig` defaults.
     branch
         Icechunk branch to write ``output`` to; created off the current tip if it
         doesn't exist yet. Ignored for plain zarr.
@@ -61,7 +61,7 @@ def rechunk(
     from annizarr._writers._encoding import autoshard_setting, write_elem
 
     if cfg is None:
-        cfg = load_config()
+        cfg = AppConfig()
     cfg = resolve_backend_cfg(cfg)
     check_output_target(output, cfg)
     configure_runtime(cfg.chunks.cpus)

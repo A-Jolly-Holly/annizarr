@@ -1,20 +1,8 @@
 from __future__ import annotations
 
 import argparse
-from typing import TYPE_CHECKING
 
-from annizarr._core._config import ChunkConfig, apply_cli_overrides, load_config
-
-if TYPE_CHECKING:
-    from annizarr._core._config import AppConfig
-
-
-def add_config_arg(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument(
-        "--config",
-        help="TOML/YAML config file whose keys mirror these flags (see example_config.toml); "
-        "precedence: defaults < file < flags",
-    )
+from annizarr._core._config import AppConfig, ChunkConfig, apply_cli_overrides
 
 
 def add_overwrite_arg(parser: argparse.ArgumentParser) -> None:
@@ -87,11 +75,10 @@ def add_autoshard_arg(parser: argparse.ArgumentParser) -> None:
 
 
 def build_config(args: argparse.Namespace) -> AppConfig:
-    # resolves from --config plus whichever override flags the calling subcommand's
-    # parser defined; flags absent from args are simply skipped
-    cfg = load_config(getattr(args, "config", None))
+    # overlays whichever override flags the calling subcommand's parser defined onto the
+    # defaults; flags absent from args are simply skipped
     return apply_cli_overrides(
-        cfg,
+        AppConfig(),
         overwrite=getattr(args, "overwrite", None),
         consolidate_metadata=getattr(args, "consolidate_metadata", None),
         x_storage=getattr(args, "x_storage", None),

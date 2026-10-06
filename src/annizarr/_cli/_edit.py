@@ -8,7 +8,6 @@ from annizarr._cli._args import (
     add_autoshard_arg,
     add_branch_arg,
     add_chunk_args,
-    add_config_arg,
     add_consolidate_arg,
     add_cpus_arg,
     add_ic_arg,
@@ -38,10 +37,10 @@ def add_add_expr_parser(subparsers: argparse._SubParsersAction[argparse.Argument
     )
     p.add_argument("--target-sum", type=float, default=1e4, help="library-size normalization target (default: 10000.0)")
     add_autoshard_arg(p)
+    add_cpus_arg(p)
     add_overwrite_arg(p)
     add_branch_arg(p)
     add_message_arg(p)
-    add_config_arg(p)
     p.set_defaults(func=_run_add_expr)
 
 
@@ -79,7 +78,6 @@ def add_rechunk_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentP
     add_ic_arg(p)
     add_branch_arg(p)
     add_message_arg(p)
-    add_config_arg(p)
     p.set_defaults(func=_run_rechunk)
 
 
@@ -115,7 +113,6 @@ def add_sort_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentPars
     add_ic_arg(p)
     add_branch_arg(p)
     add_message_arg(p)
-    add_config_arg(p)
     p.set_defaults(func=_run_sort)
 
 
@@ -137,23 +134,17 @@ def add_append_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentPa
     p.add_argument(
         "--drop-derived",
         action="store_true",
-        help="consent to dropping derived obs-aligned elements (obsm/obsp/incompatible layers)",
+        help="consent up front to dropping derived obs-aligned elements (obsm/obsp/incompatible layers); "
+        "without it you are prompted",
     )
     p.add_argument(
         "--extend-layers",
         action="store_true",
         help="extend eligible add-expr CSR layers in place instead of dropping them",
     )
-    p.add_argument(
-        "-y",
-        "--yes",
-        dest="assume_yes",
-        action="store_true",
-        help="assume yes for the loss-plan prompt",
-    )
+    add_cpus_arg(p)
     add_branch_arg(p)
     add_message_arg(p)
-    add_config_arg(p)
     p.set_defaults(func=_run_append)
 
 
@@ -182,7 +173,7 @@ def _run_append(args: argparse.Namespace) -> int:
     would_drop = bool(plan.drops(extend_layers=args.extend_layers))
 
     drop_derived = bool(args.drop_derived)
-    if would_drop and not args.drop_derived and not args.assume_yes:
+    if would_drop and not drop_derived:
         if sys.stdin.isatty():
             sys.stderr.write("Proceed? [y/N] ")
             sys.stderr.flush()
@@ -192,10 +183,8 @@ def _run_append(args: argparse.Namespace) -> int:
                 return 1
             drop_derived = True
         else:
-            _LOG.error("error: append would drop derived elements; pass --drop-derived or -y to confirm")
+            _LOG.error("error: append would drop derived elements; pass --drop-derived to confirm")
             return 1
-    elif args.assume_yes:
-        drop_derived = True
 
     result = append(
         args.store,

@@ -4,7 +4,7 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from annizarr._core._config import AppConfig, load_config, resolve_backend_cfg
+from annizarr._core._config import AppConfig, resolve_backend_cfg
 from annizarr._core._sorting import stream_sorted_store
 from annizarr._core._zarr import get_group
 from annizarr._storage import check_output_target, is_remote, open_input_group, store_name
@@ -41,7 +41,7 @@ def sort(
     by
         Obs column name(s) to sort by, primary key first.
     cfg
-        Resolved configuration; ``None`` loads :func:`~annizarr.config.load_config` defaults.
+        Resolved configuration; ``None`` uses the :class:`~annizarr.config.AppConfig` defaults.
     branch
         Icechunk branch to write ``output`` to; created off the current tip if it
         doesn't exist yet. Ignored for plain zarr.
@@ -65,7 +65,7 @@ def sort(
     from annizarr.ops._expr import introspect_gexp, write_expr_layer
 
     if cfg is None:
-        cfg = load_config()
+        cfg = AppConfig()
     cfg = resolve_backend_cfg(cfg)
     by = tuple(by)
     if is_remote(output):

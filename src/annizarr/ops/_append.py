@@ -8,7 +8,7 @@ import zarr
 from anndata.io import read_elem
 
 from annizarr._core import _layout
-from annizarr._core._config import load_config
+from annizarr._core._config import AppConfig
 from annizarr._core._runtime import configure_runtime, run_parallel, stage
 from annizarr._core._zarr import as_array, as_group, get_array, get_group, shape_attr, str_attr, str_list_attr
 from annizarr._storage import open_input_group, open_store_rw, store_name
@@ -17,7 +17,6 @@ from annizarr.ops._expr import lognorm_band, target_sum_attr
 from annizarr.ops._result import AppendPlan, OpResult
 
 if TYPE_CHECKING:
-    from annizarr._core._config import AppConfig
     from annizarr.typing import PathLike
 
 logger = logging.getLogger(__name__)
@@ -149,7 +148,7 @@ def append(
     extend_layers
         Extend eligible add-expr CSR layers in place instead of dropping them.
     cfg
-        Resolved configuration; ``None`` loads :func:`~annizarr.config.load_config` defaults.
+        Resolved configuration; ``None`` uses the :class:`~annizarr.config.AppConfig` defaults.
     branch
         Icechunk branch to edit; created off the current tip if it doesn't exist yet.
         Ignored for plain zarr.
@@ -168,7 +167,7 @@ def append(
         :func:`plan_append`), or the mutation fails partway through.
     """
     if cfg is None:
-        cfg = load_config()
+        cfg = AppConfig()
 
     plan = plan_append(store, cells=cells)
     drop_layers = list(plan.drop_layers)

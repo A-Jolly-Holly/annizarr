@@ -54,7 +54,9 @@ def prepare_output_path(output_path: PathLike, overwrite: bool) -> None:
     path = Path(output_path)
     if path.exists():
         if not overwrite:
-            raise StorageError(f"Output path already exists: {path}. Use overwrite=true in config or --overwrite flag.")
+            raise StorageError(
+                f"Output path already exists: {path}. Pass --overwrite (or IOConfig(overwrite=True)) to replace it."
+            )
         if path.is_dir():
             shutil.rmtree(path)
         else:

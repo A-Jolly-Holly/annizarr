@@ -16,7 +16,6 @@ from annizarr.config import (
     ConcatConfig,
     GroupingConfig,
     IOConfig,
-    ValidationConfig,
 )
 from annizarr.errors import ConversionError
 from annizarr.ops import concat, convert_h5ad
@@ -106,7 +105,6 @@ def test_icechunk_roundtrip_eager_and_op_result_snapshot_ids(tmp_path: Path, cap
     cfg = AppConfig(
         io=IOConfig(overwrite=True, backend="icechunk", lazy=False),
         chunks=_chunks(),
-        validation=ValidationConfig(),
     )
     ic_result = convert_h5ad(str(tmp_path / "in.h5ad"), output=str(out), cfg=cfg)
     assert isinstance(ic_result.snapshot_id, str) and ic_result.snapshot_id
@@ -123,7 +121,7 @@ def test_icechunk_roundtrip_eager_and_op_result_snapshot_ids(tmp_path: Path, cap
 
     # a plain-zarr OpResult carries no snapshot_id; an icechunk one always does, and each op
     # gets its own distinct snapshot
-    plain_cfg = AppConfig(io=IOConfig(overwrite=True, lazy=False), chunks=_chunks(), validation=ValidationConfig())
+    plain_cfg = AppConfig(io=IOConfig(overwrite=True, lazy=False), chunks=_chunks())
     plain_result = convert_h5ad(str(tmp_path / "in.h5ad"), output=str(tmp_path / "plain.zarr"), cfg=plain_cfg)
     assert plain_result.snapshot_id is None
 
@@ -145,7 +143,6 @@ def test_lazy_h5ad_into_icechunk_runs_the_read_ahead_pipeline(tmp_path: Path, ca
         cfg = AppConfig(
             io=IOConfig(overwrite=True, backend="icechunk", lazy=True, x_storage=x_storage),
             chunks=_chunks(cpus=2),
-            validation=ValidationConfig(),
         )
         caplog.clear()
         with caplog.at_level("INFO", logger="annizarr"):
@@ -176,7 +173,6 @@ def _sorted_cfg(backend: str = "zarr") -> AppConfig:
     return AppConfig(
         io=IOConfig(overwrite=True, backend=backend, lazy=False),
         chunks=_chunks(),
-        validation=ValidationConfig(),
         grouping=GroupingConfig(enabled=True, sort_by=("cell_type", "demographic")),
     )
 
@@ -220,7 +216,7 @@ def test_sort_dense_writes_contiguous_ranges_and_rejects_unsupported_x_storage(t
     """Dense X supports --sort-by: rows are physically sorted so each key tuple is a
     contiguous run derivable from the sorted obs and read directly via X[start:end]
     (stock zarr, no annizarr, no index). --sort-by also requires x_storage='csr' or 'dense'
-    in general, and further requires 'csr' specifically when combined with --lazy
+    in general, and further requires 'csr' specifically when combined with lazy
     (streamed bucketing is csr-only; dense sort still works eagerly, as above)."""
     _labelled_h5ad(tmp_path / "in.h5ad")
     out = tmp_path / "sorted_dense.zarr"
@@ -229,7 +225,6 @@ def test_sort_dense_writes_contiguous_ranges_and_rejects_unsupported_x_storage(t
     cfg = AppConfig(
         io=IOConfig(overwrite=True, x_storage="dense", lazy=False),
         chunks=_chunks(),
-        validation=ValidationConfig(),
         grouping=GroupingConfig(enabled=True, sort_by=("cell_type", "demographic")),
     )
     convert_h5ad(str(tmp_path / "in.h5ad"), output=str(out), cfg=cfg)
@@ -262,7 +257,6 @@ def test_sort_dense_writes_contiguous_ranges_and_rejects_unsupported_x_storage(t
     cfg_csc = AppConfig(
         io=IOConfig(overwrite=True, x_storage="csc", lazy=False),
         chunks=_chunks(),
-        validation=ValidationConfig(),
         grouping=GroupingConfig(enabled=True, sort_by=("cell_type",)),
     )
     with pytest.raises(ConversionError, match="requires x_storage='csr' or 'dense'"):
@@ -271,7 +265,6 @@ def test_sort_dense_writes_contiguous_ranges_and_rejects_unsupported_x_storage(t
     cfg_lazy_dense = AppConfig(
         io=IOConfig(overwrite=True, lazy=True, x_storage="dense"),
         chunks=_chunks(),
-        validation=ValidationConfig(),
         grouping=GroupingConfig(enabled=True, sort_by=("cell_type",)),
     )
     with pytest.raises(ConversionError, match="csr"):
@@ -282,13 +275,12 @@ def _lazy_sorted_cfg() -> AppConfig:
     return AppConfig(
         io=IOConfig(overwrite=True, lazy=True, x_storage="csr"),
         chunks=_chunks(),
-        validation=ValidationConfig(),
         grouping=GroupingConfig(enabled=True, sort_by=("cell_type", "demographic")),
     )
 
 
 def test_sort_lazy_streamed_matches_eager(tmp_path: Path) -> None:
-    """--lazy --sort-by (streamed bucketing, Option C) yields the SAME sorted csr
+    """lazy --sort-by (streamed bucketing, Option C) yields the SAME sorted csr
     store as the eager path — same row order, X values, and reordered obsm — without ever
     materialising X in full."""
     _labelled_h5ad(tmp_path / "in.h5ad")
@@ -331,7 +323,6 @@ def test_lazy_sort_default_commit_message_names_sort_columns(tmp_path: Path) -> 
     cfg = AppConfig(
         io=IOConfig(overwrite=True, lazy=True, x_storage="csr", backend="icechunk"),
         chunks=_chunks(),
-        validation=ValidationConfig(),
         grouping=GroupingConfig(enabled=True, sort_by=("cell_type", "demographic")),
     )
     try:
@@ -366,7 +357,6 @@ def _dense_cfg(shard_factor: int = 1, **chunk_kw) -> AppConfig:
     return AppConfig(
         io=IOConfig(overwrite=True, x_storage="dense"),
         chunks=_chunks(x_shard_factor=shard_factor, **chunk_kw),
-        validation=ValidationConfig(),
     )
 
 
@@ -412,7 +402,6 @@ def test_sharding_lazy_dense_parallel_roundtrip(tmp_path: Path) -> None:
     cfg = AppConfig(
         io=IOConfig(overwrite=True, x_storage="dense", lazy=True),
         chunks=_chunks(x_shard_factor=2, cpus=2),
-        validation=ValidationConfig(),
     )
     convert_h5ad(str(tmp_path / "in.h5ad"), output=str(out), cfg=cfg)
 
@@ -427,7 +416,6 @@ def test_sharding_ignored_for_sparse(tmp_path: Path, caplog) -> None:
     cfg = AppConfig(
         io=IOConfig(overwrite=True, x_storage="csr"),
         chunks=_chunks(x_shard_factor=4),
-        validation=ValidationConfig(),
     )
     convert_h5ad(str(tmp_path / "in.h5ad"), output=str(out), cfg=cfg)
 
@@ -481,7 +469,6 @@ def test_parallel_write_roundtrip_inmem_and_concat_seam(tmp_path: Path) -> None:
         cfg = AppConfig(
             io=IOConfig(overwrite=True, x_storage=x_storage),
             chunks=ChunkConfig(x_row_chunk=64, x_col_chunk=200, sparse_flat_chunk=500, cpus=4),
-            validation=ValidationConfig(),
         )
         convert_h5ad(str(tmp_path / f"in_{x_storage}.h5ad"), output=str(out), cfg=cfg)
         assert np.array_equal(_read_X(out), src)
@@ -493,7 +480,6 @@ def test_parallel_write_roundtrip_inmem_and_concat_seam(tmp_path: Path) -> None:
         cfg = AppConfig(
             io=IOConfig(overwrite=True, x_storage=x_storage),
             chunks=ChunkConfig(x_row_chunk=64, x_col_chunk=500, sparse_flat_chunk=500, cpus=4),
-            validation=ValidationConfig(),
         )
         concat([str(tmp_path / f"a_{x_storage}.h5ad"), str(tmp_path / f"b_{x_storage}.h5ad")], output=str(out), cfg=cfg)
         assert np.array_equal(_read_X(out), np.vstack([a, b]))
@@ -512,7 +498,6 @@ def test_concat_lazy_csc_input_streams_without_materializing(tmp_path: Path) -> 
     cfg = AppConfig(
         io=IOConfig(overwrite=True, x_storage="csr", lazy=True),
         chunks=ChunkConfig(x_row_chunk=16, x_col_chunk=40, sparse_flat_chunk=500),
-        validation=ValidationConfig(),
     )
     concat([str(tmp_path / "a.h5ad"), str(tmp_path / "b.h5ad")], output=str(out), cfg=cfg)
     assert np.array_equal(_read_X(out), np.vstack([a, b]))
@@ -564,7 +549,6 @@ def test_concat_obs_columns_projects_and_warns(tmp_path: Path, caplog) -> None:
     cfg = AppConfig(
         io=IOConfig(overwrite=True, x_storage="csr"),
         chunks=_chunks(),
-        validation=ValidationConfig(),
         concat=ConcatConfig(obs_columns=("cell_type", "donor", "score")),
     )
     concat([str(tmp_path / "a.h5ad"), str(tmp_path / "b.h5ad")], output=str(out), cfg=cfg)
@@ -583,7 +567,6 @@ def test_concat_obs_columns_missing_or_categorical_mismatch_raises(tmp_path: Pat
     cfg_missing = AppConfig(
         io=IOConfig(overwrite=True, x_storage="csr"),
         chunks=_chunks(),
-        validation=ValidationConfig(),
         concat=ConcatConfig(obs_columns=("cell_type", "qc_a")),  # qc_a exists only in a.h5ad
     )
     with pytest.raises(ConversionError, match="obs columns not found"):
@@ -596,7 +579,6 @@ def test_concat_obs_columns_missing_or_categorical_mismatch_raises(tmp_path: Pat
     cfg_mismatch = AppConfig(
         io=IOConfig(overwrite=True, x_storage="csr"),
         chunks=_chunks(),
-        validation=ValidationConfig(),
         concat=ConcatConfig(obs_columns=("cell_type", "donor")),
     )
     with pytest.raises(ConversionError, match="mismatched categorical categories"):
@@ -612,7 +594,6 @@ def test_concat_obs_columns_categorical_match_ok(tmp_path: Path) -> None:
     cfg = AppConfig(
         io=IOConfig(overwrite=True, x_storage="csr"),
         chunks=_chunks(),
-        validation=ValidationConfig(),
         concat=ConcatConfig(obs_columns=("cell_type", "donor")),
     )
     concat([str(tmp_path / "a.h5ad"), str(tmp_path / "b.h5ad")], output=str(out), cfg=cfg)
@@ -629,7 +610,6 @@ def test_concat_default_strict_rejects_mismatched_obs(tmp_path: Path) -> None:
     cfg = AppConfig(
         io=IOConfig(overwrite=True, x_storage="csr"),
         chunks=_chunks(),
-        validation=ValidationConfig(),
     )
     with pytest.raises(ConversionError, match="obs schema mismatch"):
         concat([str(tmp_path / "a.h5ad"), str(tmp_path / "b.h5ad")], output=str(tmp_path / "o.zarr"), cfg=cfg)

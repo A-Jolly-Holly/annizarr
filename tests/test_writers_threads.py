@@ -26,7 +26,7 @@ import annizarr._core._layout as _layout
 from _readable import assert_anndata_readable
 from annizarr._core._runtime import run_parallel
 from annizarr._writers._sparse import flat_segments
-from annizarr.config import AppConfig, ChunkConfig, IOConfig, ValidationConfig
+from annizarr.config import AppConfig, ChunkConfig, IOConfig
 from annizarr.ops import append, concat, convert_adata, rechunk
 
 
@@ -100,7 +100,6 @@ def _cfg(
             cpus=cpus,
             x_shard_factor=x_shard_factor,
         ),
-        validation=ValidationConfig(),
     )
 
 
@@ -249,7 +248,6 @@ def _autoshard_cfg(*, cpus: int) -> AppConfig:
     return AppConfig(
         io=IOConfig(overwrite=True, x_storage="csr"),
         chunks=ChunkConfig(sparse_flat_chunk=AUTOSHARD_FLAT_CHUNK, cpus=cpus, auto_shard=True),
-        validation=ValidationConfig(),
     )
 
 

@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from annizarr._core import _layout
-from annizarr._core._config import load_config
+from annizarr._core._config import AppConfig
 from annizarr._core._layout import x_compressors
 from annizarr._core._runtime import configure_runtime, stage
 from annizarr._core._zarr import get_array, get_group, shape_attr
@@ -25,7 +25,6 @@ if TYPE_CHECKING:
     import zarr
     from numpy.typing import NDArray
 
-    from annizarr._core._config import AppConfig
     from annizarr.typing import PathLike, XStorage
 
 logger = logging.getLogger(__name__)
@@ -68,7 +67,7 @@ def add_expr(
     overwrite
         Replace an existing ``layers/<layer>`` instead of erroring.
     cfg
-        Resolved configuration; ``None`` loads :func:`~annizarr.config.load_config` defaults.
+        Resolved configuration; ``None`` uses the :class:`~annizarr.config.AppConfig` defaults.
     branch
         Icechunk branch to edit; created off the current tip if it doesn't exist yet.
         Ignored for plain zarr.
@@ -86,7 +85,7 @@ def add_expr(
         not set, or ``fmt`` is not one of ``"csr"``, ``"csc"``, ``"dense"``.
     """
     if cfg is None:
-        cfg = load_config()
+        cfg = AppConfig()
     configure_runtime(cfg.chunks.cpus)
     commit_message = message or f"annizarr add-expr {fmt} → layers/{layer}"
     root, finalize = open_store_rw(store, cfg, commit_message=commit_message, branch=branch)

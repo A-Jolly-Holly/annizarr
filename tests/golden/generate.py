@@ -29,7 +29,7 @@ import scipy.sparse as sp
 from anndata import AnnData
 
 import annizarr
-from annizarr.config import apply_cli_overrides, load_config
+from annizarr.config import AppConfig, apply_cli_overrides
 
 GOLDEN_DIR = Path(__file__).resolve().parent
 N_OBS, N_VARS = 100, 50
@@ -160,7 +160,7 @@ def _build_cfg(case: dict[str, Any]) -> Any:
     # case.json keeps the "backed" key name (matches the already-packed tarballs' schema,
     # read back by test_golden_writers.py); map it onto apply_cli_overrides(lazy=) here.
     return apply_cli_overrides(
-        load_config(),
+        AppConfig(),
         x_storage=case["x_storage"],
         lazy=case.get("backed", False),
         cpus=case.get("cpus"),

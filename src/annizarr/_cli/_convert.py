@@ -7,7 +7,6 @@ from annizarr._cli._args import (
     add_autoshard_arg,
     add_branch_arg,
     add_chunk_args,
-    add_config_arg,
     add_consolidate_arg,
     add_cpus_arg,
     add_ic_arg,
@@ -35,20 +34,12 @@ def add_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) 
         choices=("h5ad", "10x"),
         help="override content-based format detection",
     )
-    lazy_group = p.add_mutually_exclusive_group()
-    lazy_group.add_argument(
-        "--lazy",
-        dest="lazy",
-        action="store_true",
-        default=None,
-        help="stream the input band by band (default)",
-    )
-    lazy_group.add_argument(
+    p.add_argument(
         "--eager",
         dest="lazy",
         action="store_false",
         default=None,
-        help="load the whole input in memory first; faster for small files",
+        help="load the whole input into memory first; faster for small files (default: stream it band by band)",
     )
     p.add_argument(
         "--x-storage",
@@ -77,7 +68,6 @@ def add_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) 
     add_ic_arg(p)
     add_branch_arg(p)
     add_message_arg(p)
-    add_config_arg(p)
     p.set_defaults(func=_run, _parser=p)
 
 

@@ -4,7 +4,7 @@ import logging
 import time
 from typing import TYPE_CHECKING
 
-from annizarr._core._config import AppConfig, load_config, resolve_backend_cfg
+from annizarr._core._config import AppConfig, resolve_backend_cfg
 from annizarr._core._runtime import configure_runtime, stage
 from annizarr._core._validation import validate_single_cell_anndata
 from annizarr._sources import open_source
@@ -48,7 +48,7 @@ def concat(
     import pandas as pd
 
     if cfg is None:
-        cfg = load_config()
+        cfg = AppConfig()
     if not paths:
         raise ConversionError("concat requires at least one input file.")
 
@@ -197,6 +197,6 @@ def concat(
 
 
 def _validate_and_warn(adata: ad.AnnData, cfg: AppConfig, label: str) -> None:
-    result = validate_single_cell_anndata(adata, cfg.validation)
+    result = validate_single_cell_anndata(adata)
     for w in result.warnings:
         logger.warning(f"[{label}] {w}")

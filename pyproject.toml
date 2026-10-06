@@ -16,7 +16,6 @@ dependencies = [
   "numpy>=1.24",
   "scipy>=1.10",
   "h5py>=3.8",
-  "PyYAML>=6",
 ]
 # floors match the vendored ground truth (zarr 3.3.0, icechunk 2.1.2); ceilings verified
 # clean through zarr 3.4.0 / icechunk 2.2.2 / numpy 2.5.3
@@ -29,7 +28,6 @@ dev = [
   "hypothesis",
   "ruff",
   "mypy",
-  "types-PyYAML",
   "moto[s3,server]>=5",  # server: ThreadedMotoServer, needed by tests/test_ic_copy_s3.py
   "scanpy>=1.10",
   "build",

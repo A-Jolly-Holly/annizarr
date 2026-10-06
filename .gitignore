@@ -10,3 +10,6 @@ dist/
 .coverage
 htmlcov/
 .data/
+*.ipynb
+publish_steps.md
+CHANGELOG.md

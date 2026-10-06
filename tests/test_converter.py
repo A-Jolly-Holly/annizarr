@@ -10,7 +10,7 @@ import pytest
 import scipy.sparse as sp
 import zarr
 
-from annizarr.config import AppConfig, ChunkConfig, IOConfig, ValidationConfig
+from annizarr.config import AppConfig, ChunkConfig, IOConfig
 from annizarr.errors import ConversionError, StorageError
 from annizarr.ops import convert_10x_h5, convert_adata, convert_h5ad
 
@@ -21,7 +21,7 @@ from annizarr.ops import convert_10x_h5, convert_adata, convert_h5ad
 # The core (input format x lazy x x_storage) dispatch grid lives in test_convert_matrix.py,
 # via the shared Reader abstraction every input now goes through. What's left here is
 # behaviour outside that grid: the 10x loader, the existing-target fast-fail + flat-chunk
-# sizing, convert_adata's own lazy-sync, and the lazy-CSC temp-dir cleanup + the --lazy ->
+# sizing, convert_adata's own lazy-sync, and the lazy-CSC temp-dir cleanup + the lazy ->
 # backed="r" regression guard.
 
 
@@ -29,7 +29,6 @@ def _cfg(x_storage: str, sparse_flat_chunk: int = 2048) -> AppConfig:
     return AppConfig(
         io=IOConfig(overwrite=False, consolidate_metadata=False, x_storage=x_storage),
         chunks=ChunkConfig(x_row_chunk=2, x_col_chunk=2, sparse_flat_chunk=sparse_flat_chunk),
-        validation=ValidationConfig(),
     )
 
 
@@ -37,7 +36,6 @@ def _cfg_lazy(x_storage: str) -> AppConfig:
     return AppConfig(
         io=IOConfig(overwrite=False, consolidate_metadata=False, x_storage=x_storage, lazy=True),
         chunks=ChunkConfig(x_row_chunk=2, x_col_chunk=2, sparse_flat_chunk=2048),
-        validation=ValidationConfig(),
     )
 
 
@@ -184,7 +182,7 @@ def test_convert_adata_accepts_a_backed_anndata(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Lazy CSC: temp-dir cleanup + the --lazy -> backed="r" regression guard
+# Lazy CSC: temp-dir cleanup + the lazy -> backed="r" regression guard
 # ---------------------------------------------------------------------------
 
 
@@ -204,14 +202,14 @@ def test_h5ad_lazy_csc_to_dense_matches_eager_no_tmp_dir_left(tmp_path: Path) ->
     """A lazy CSC source (X, or the 'cnt' layer -- both directions checked) converted with
     x_storage='dense' streams through a temporary CSC->CSR transpose (never materialising the
     whole matrix) and matches the eager (in-memory) conversion byte-for-byte; the temp dir is
-    cleaned up either way. Also the only regression guard that --lazy actually causes a
+    cleaned up either way. Also the only regression guard that lazy actually causes a
     backed="r" load (an output-format-only assertion wouldn't catch a silently-ignored flag,
     since a small fixture converts identically either way)."""
     # chunks sized for the 300x200 fixture (not a 2x2 default, which would tile it into
     # thousands of tiny writes)
     chunks = ChunkConfig(x_row_chunk=64, x_col_chunk=64)
     for x_csc in (False, True):
-        cfg_eager = AppConfig(io=IOConfig(x_storage="dense", lazy=False), chunks=chunks, validation=ValidationConfig())
+        cfg_eager = AppConfig(io=IOConfig(x_storage="dense", lazy=False), chunks=chunks)
         cfg_lazy = replace(cfg_eager, io=replace(cfg_eager.io, lazy=True))
 
         input_h5 = tmp_path / f"input_{x_csc}.h5ad"
