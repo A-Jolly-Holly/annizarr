@@ -5,8 +5,8 @@ title: AnniZarr
 version: 0.1.0
 date-released: 2026-09-29
 license: MIT
-repository-code: "https://github.com/aifimmunology/DataScales"
+repository-code: "https://github.com/A-Jolly-Holly/annizarr"
 authors:
   - family-names: Holly
     given-names: Alex
-    affiliation: Allen Institute
+    affiliation: Allen Institute for Immunology

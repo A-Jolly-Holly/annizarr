@@ -53,7 +53,8 @@ class IOConfig:
     backend
         ``"zarr"`` writes a plain on-disk store; ``"icechunk"`` writes through a
         transactional, versioned Icechunk repository (one commit per op). Icechunk
-        targets are a local path or an ``s3://bucket/prefix`` URL (env credentials).
+        targets are a local path or an ``s3://`` / ``gs://`` bucket prefix, with
+        credentials taken from the environment.
     """
 
     overwrite: bool = False
@@ -94,10 +95,8 @@ class ChunkConfig:
         (obs/var columns, obsm, uns, …), so anndata's own writes are auto-sharded too.
         Cuts object/file count on remote or many-small-chunk stores at a small write-time
         cost (see :func:`annizarr._writers._encoding.sparse_shards`). Dense X is unaffected
-        — it keeps the explicit ``x_shard_factor`` above, never ``shards="auto"``. Default
-        chosen from a read-latency benchmark (see
-        ``benchmarking_results/autoshard/README.md``); ``False`` reproduces the pre-autoshard
-        on-disk layout exactly.
+        — it keeps the explicit ``x_shard_factor`` above, never ``shards="auto"``. ``False``
+        (the default) reproduces the pre-autoshard on-disk layout exactly.
     """
 
     x_row_chunk: int = 2048
