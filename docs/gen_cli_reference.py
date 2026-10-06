@@ -24,6 +24,20 @@ Global options go before the command: `-v`/`--verbose` (debug logging), `-q`/`--
 """
 
 
+class _PinnedFormatter(argparse.HelpFormatter):
+    """Python 3.13's option formatting ("-m, --message MSG") on every version.
+
+    3.12 prints "-m MSG, --message MSG" and aligns columns differently, which would make the
+    generated page depend on the interpreter that produced it.
+    """
+
+    def _format_action_invocation(self, action: argparse.Action) -> str:
+        if not action.option_strings or action.nargs == 0:
+            return super()._format_action_invocation(action)
+        default = self._get_default_metavar_for_optional(action)
+        return ", ".join(action.option_strings) + " " + self._format_args(action, default)
+
+
 def render() -> str:
     """Return the Markdown page: one section per subcommand with its --help text verbatim."""
     from annizarr._cli import _build_parser
@@ -36,6 +50,7 @@ def render() -> str:
         summaries = {a.dest: a.help or "" for a in sub._choices_actions}
         parts = [HEADER]
         for name in COMMANDS:
+            sub.choices[name].formatter_class = _PinnedFormatter
             parts.append(f"## {name}\n\n{summaries[name]}\n\n```text\n{sub.choices[name].format_help()}```\n")
         return "\n".join(parts)
     finally:

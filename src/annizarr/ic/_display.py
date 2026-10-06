@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import zarr
 
@@ -80,10 +80,11 @@ class Group(zarr.Group):
 
 def _alias_in_anndata_registry() -> None:
     # anndata dispatches read/write on the exact store type, so its zarr.Group entries are
-    # repeated for Group (private registry, verified against .claude/vendor/anndata 0.12.19)
-    from anndata._io.specs import _LAZY_REGISTRY, _REGISTRY
+    # repeated for Group (private registry, checked against anndata 0.13.4)
+    from anndata._io.specs.registry import _LAZY_REGISTRY, _REGISTRY
 
-    for registry in (_REGISTRY, _LAZY_REGISTRY):
+    registries: list[Any] = [_REGISTRY, _LAZY_REGISTRY]  # Any: the two registries' value types differ
+    for registry in registries:
         for key, func in list(registry.read.items()):
             if key[0] is zarr.Group:
                 registry.read.setdefault((Group, *key[1:]), func)

@@ -4,7 +4,7 @@ import warnings
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
-from anndata._io.specs import write_elem  # private API; verified against .claude/vendor/anndata/src (0.12.19)
+from anndata._io.specs import write_elem  # private API; checked against anndata 0.13.4
 
 if TYPE_CHECKING:
     from collections.abc import Iterator

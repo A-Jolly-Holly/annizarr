@@ -76,7 +76,7 @@ Some of the main options; the docs have all of them:
   primary key first
 
 **What gets written.** Every store is anndata-readable zarr v3 with `encoding-type`/`encoding-version`
-attrs matching anndata 0.12's on-disk spec. X and layers may be dense, CSR or CSC on input (h5ad or
+attrs matching anndata 0.13's on-disk spec. X and layers may be dense, CSR or CSC on input (h5ad or
 10x, mixed across inputs) and are written in whatever `--layout` asks for; X defaults to CSR.
 `convert`/`rechunk`/`sort` write to a sibling temp store, verify it opens, then rename it onto the
 target, so a killed run never leaves a partial store. On Icechunk every op is exactly one commit,

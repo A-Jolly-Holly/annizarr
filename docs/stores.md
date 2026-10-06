@@ -2,7 +2,7 @@
 
 ## anndata-readable zarr v3
 
-Every store is a zarr v3 group that `anndata.read_zarr` (anndata 0.12.x) opens directly. annizarr
+Every store is a zarr v3 group that `anndata.read_zarr` (anndata 0.13) opens directly. annizarr
 writes the `encoding-type` / `encoding-version` attrs itself to match anndata's on-disk spec:
 
 | Element | `encoding-type` | `encoding-version` |

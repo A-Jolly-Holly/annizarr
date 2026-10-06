@@ -327,7 +327,7 @@ def test_append_drop_derived(tmp_path, caplog):
     append(str(sa), cells=str(sb), drop_derived=True, cfg=_cfg())
     assert any("add-expr" in m for m in _messages(caplog))
     got = ad.read_zarr(str(sa))
-    assert got.n_obs == 42 and len(got.layers) == 0 and len(got.obsm) == 0
+    assert got.n_obs == 42 and "gexp" not in got.layers and len(got.obsm) == 0
     add_expr(str(sa), layout="csc", target_sum=1e6, cfg=_layer_cfg(32))
     got = ad.read_zarr(str(sa))
     np.testing.assert_allclose(

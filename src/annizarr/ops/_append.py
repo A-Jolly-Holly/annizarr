@@ -17,6 +17,8 @@ from annizarr.ops._expr import lognorm_band, target_sum_attr
 from annizarr.ops._result import AppendPlan, OpResult
 
 if TYPE_CHECKING:
+    import pandas as pd
+
     from annizarr.typing import PathLike
 
 logger = logging.getLogger(__name__)
@@ -66,7 +68,8 @@ def plan_append(store: PathLike, *, cells: PathLike) -> AppendPlan:
     obsp_keys = list(get_group(root, "obsp")) if "obsp" in root else []
     obsm_keys = list(get_group(root, "obsm")) if "obsm" in root else []
 
-    var_t, var_s = read_elem(root["var"]), read_elem(src["var"])
+    var_t: pd.DataFrame = read_elem(root["var"])
+    var_s: pd.DataFrame = read_elem(src["var"])
     if len(var_t) != len(var_s) or not (var_t.index == var_s.index).all():
         raise ConversionError("var mismatch: names + order must be identical between stores.")
 

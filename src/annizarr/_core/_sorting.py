@@ -88,7 +88,8 @@ def _write_sorted_lazy(
             f"lazy --sort-by supports layout='csr' only (got '{cfg.io.layout}'). "
             "Pass --eager to sort dense/CSC in memory."
         )
-    if adata.layers or adata.raw is not None or len(adata.obsp) > 0:
+    has_layers = any(k is not None for k in adata.layers.keys())  # anndata>=0.13 lists X under None
+    if has_layers or adata.raw is not None or len(adata.obsp) > 0:
         raise ConversionError(
             "lazy --sort-by does not reorder layers/raw/obsp yet (they are obs-aligned and "
             "would need their own streamed reorder). Pass --eager to sort in memory, or drop them."

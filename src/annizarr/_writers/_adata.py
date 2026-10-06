@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from annizarr._core._runtime import stage
 from annizarr._core._zarr import get_group
@@ -14,6 +14,11 @@ if TYPE_CHECKING:
     import zarr
 
     from annizarr._core._config import AppConfig
+
+
+def named_layers(adata: ad.AnnData) -> dict[str, Any]:
+    """The layers proper: anndata>=0.13 also lists X in ``.layers`` under the key ``None``."""
+    return {name: data for name, data in adata.layers.items() if name is not None}
 
 
 def write_adata(adata: ad.AnnData, store: zarr.Group, cfg: AppConfig) -> None:
@@ -36,11 +41,12 @@ def write_adata(adata: ad.AnnData, store: zarr.Group, cfg: AppConfig) -> None:
     finally:
         x_reader.close()
 
-    if adata.layers:
+    layers = named_layers(adata)
+    if layers:
         with autoshard_setting(cfg.chunks.auto_shard):
             write_elem(store, "layers", {})
         layers_group = get_group(store, "layers")
-        for name, data in adata.layers.items():
+        for name, data in layers.items():
             reader = as_reader(data, cfg=cfg, tmp_dir=tmp_dir)
             try:
                 with stage(f"Writing layers/{name} (shape={reader.shape})"):
@@ -49,12 +55,13 @@ def write_adata(adata: ad.AnnData, store: zarr.Group, cfg: AppConfig) -> None:
                 reader.close()
 
     if adata.raw is not None:
+        raw: Any = adata.raw  # anndata 0.13 types Raw.varm against AnnData rather than Raw
         raw_group = store.require_group("raw")
         set_raw_group_attrs(raw_group)
         with autoshard_setting(cfg.chunks.auto_shard):
-            write_elem(raw_group, "var", adata.raw.var)
-            write_elem(raw_group, "varm", dict(adata.raw.varm))
-        reader = as_reader(adata.raw.X, cfg=cfg, tmp_dir=tmp_dir)
+            write_elem(raw_group, "var", raw.var)
+            write_elem(raw_group, "varm", dict(raw.varm))
+        reader = as_reader(raw.X, cfg=cfg, tmp_dir=tmp_dir)
         try:
             with stage(f"Writing raw/X (shape={reader.shape})"):
                 write_matrix(raw_group, "X", reader, cfg)
