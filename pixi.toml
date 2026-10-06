@@ -20,8 +20,7 @@ pytest-cov = "*"
 hypothesis = "*"
 
 [feature.py312.dependencies]
-# floor-testing env: zarr>=3.3 itself requires python>=3.12 (PyPI/conda-forge metadata,
-# every 3.2.0+ release), so the real floor is 3.12, not the 3.10 the spec assumed
+# floor env: 3.12 is the oldest python zarr>=3.3 supports
 python = "3.12.*"
 icechunk = ">=2.1.2,<3"
 boto3 = ">=1.28"
