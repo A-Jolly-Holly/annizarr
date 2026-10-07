@@ -54,7 +54,7 @@ Icechunk history, branches, cherry-picks live in the Python API `annizarr.Repo` 
 
 ## Configuration and zarr stores
 
-Every flag is documented in `annizarr <command> --help`; [docs/cli.md](docs/cli.md) has the same
+Every flag is documented in `annizarr <command> --help`; [docs/cli.md](https://github.com/A-Jolly-Holly/annizarr/blob/main/docs/cli.md) has the same
 reference in one place. Inputs stream band by band by default, so memory stays bounded at any store
 size (`--eager` loads the whole input first, faster for small files), and matrix writes use every
 core unless `--cpus` says otherwise.
@@ -79,12 +79,12 @@ attrs matching anndata 0.13's on-disk spec. X and layers may be dense, CSR or CS
 10x, mixed across inputs) and are written in whatever `--layout` asks for; X defaults to CSR.
 `convert`/`rechunk`/`sort` write to a sibling temp store, verify it opens, then rename it onto the
 target, so a killed run never leaves a partial store. On Icechunk every op is exactly one commit,
-and remote (`s3://`, `gs://`) outputs require it. More in [docs/stores.md](docs/stores.md).
+and remote (`s3://`, `gs://`) outputs require it. More in [docs/stores.md](https://github.com/A-Jolly-Holly/annizarr/blob/main/docs/stores.md).
 
 ## Python API for Icechunk usage
 
 The full Python API, including the config dataclasses and the ops functions, is in
-[docs/python-api.md](docs/python-api.md).
+[docs/python-api.md](https://github.com/A-Jolly-Holly/annizarr/blob/main/docs/python-api.md).
 
 ```python
 import annizarr as az
@@ -123,4 +123,4 @@ Golden stores for regression tests live in `tests/golden/`.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [LICENSE](https://github.com/A-Jolly-Holly/annizarr/blob/main/LICENSE).

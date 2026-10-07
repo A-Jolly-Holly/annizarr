@@ -10,6 +10,16 @@ readme = "README.md"
 requires-python = ">=3.12"  # zarr>=3.3 needs >=3.12
 license = "MIT"
 authors = [{ name = "Alex Holly", email = "alex.holly@alleninstitute.org" }]
+keywords = ["anndata", "zarr", "icechunk", "single-cell", "scrna-seq"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Science/Research",
+  "Topic :: Scientific/Engineering :: Bio-Informatics",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Operating System :: OS Independent",
+]
 dependencies = [
   "anndata>=0.13",  # 0.13 lists X in .layers under None
   "pandas>=2.3",  # imported directly (frame prep, append); floor matches anndata's
@@ -34,6 +44,12 @@ dev = [
   "twine",
   "pre-commit",
 ]
+
+[project.urls]
+Homepage = "https://github.com/A-Jolly-Holly/annizarr"
+Documentation = "https://github.com/A-Jolly-Holly/annizarr/tree/main/docs"
+Repository = "https://github.com/A-Jolly-Holly/annizarr"
+Issues = "https://github.com/A-Jolly-Holly/annizarr/issues"
 
 [project.scripts]
 annizarr = "annizarr._cli:main"
