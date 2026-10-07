@@ -3,7 +3,7 @@ message: "If you use this software, please cite it as below."
 type: software
 title: AnniZarr
 version: 0.1.0
-date-released: 2026-09-29
+date-released: 2026-10-07
 license: MIT
 repository-code: "https://github.com/A-Jolly-Holly/annizarr"
 authors:

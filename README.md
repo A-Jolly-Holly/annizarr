@@ -7,14 +7,15 @@ Convert to, append, sort anndata zarr storages efficiently with parallel and laz
 
 ## Install
 
-Not yet on PyPI — install from this directory. `annizarr` and the shorter `anz` are the same command.
+`annizarr` and the shorter `anz` are the same command. The `icechunk` extra adds versioned stores and
+remote (`s3://`, `gs://`) targets.
 
 ```bash
-pip install .
-pip install ".[icechunk]"
+pip install annizarr
+pip install "annizarr[icechunk]"
 ```
 
-Or use the pixi dev environment:
+To work on the code instead, use the pixi dev environment:
 
 ```bash
 pixi install
