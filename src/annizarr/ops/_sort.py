@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from annizarr._core._config import AppConfig, resolve_backend_cfg
 from annizarr._core._sorting import stream_sorted_store
-from annizarr._core._zarr import get_group
+from annizarr._core._zarr import get_group, has_element
 from annizarr._storage import check_output_target, is_remote, open_input_group, store_name
 from annizarr.errors import ConversionError
 from annizarr.ops._result import OpResult
@@ -90,7 +90,7 @@ def sort(
     elif layer_keys:
         raise ConversionError(f"sort does not reorder layers {layer_keys}; only a gexp layer is re-derived.")
     for key in ("raw", "obsp"):
-        if key in src and len(list(get_group(src, key))) > 0:
+        if has_element(src, key) and len(list(get_group(src, key))) > 0:
             raise ConversionError(f"sort does not reorder {key} yet; drop it or sort at convert time.")
 
     def _read(key: str) -> Any:

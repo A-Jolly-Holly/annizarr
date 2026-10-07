@@ -6,6 +6,7 @@ from unittest.mock import patch
 import anndata as ad
 import h5py
 import numpy as np
+import pandas as pd
 import pytest
 import scipy.sparse as sp
 import zarr
@@ -229,3 +230,41 @@ def test_h5ad_lazy_csc_to_dense_matches_eager_no_tmp_dir_left(tmp_path: Path) ->
         np.testing.assert_array_equal(np.asarray(got_lazy.X), np.asarray(got_eager.X))
         np.testing.assert_array_equal(np.asarray(got_lazy.layers["cnt"]), np.asarray(got_eager.layers["cnt"]))
     assert not list(tmp_path.rglob("annizarr_csc2csr_*"))
+
+
+def test_string_dtype_index_is_written_as_plain_string_array(tmp_path: Path) -> None:
+    """pandas 3 gives indexes its ``str`` dtype (pandas 2: opt in with dtype="string"), which
+    anndata encodes as a nullable-string-array group; annizarr always writes a plain array."""
+    adata = ad.AnnData(
+        X=sp.csr_matrix(np.arange(6, dtype=np.float32).reshape(3, 2)),
+        obs=pd.DataFrame(index=pd.Index(["c1", "c2", "c3"], dtype="string")),
+        var=pd.DataFrame(index=pd.Index(["g1", "g2"], dtype="string")),
+    )
+    out = tmp_path / "out.zarr"
+    convert_adata(adata, output=str(out), cfg=_cfg("csr"))
+    root = zarr.open_group(str(out), mode="r")
+    for key in ("obs/_index", "var/_index"):
+        assert isinstance(root[key], zarr.Array), key
+        assert root[key].attrs["encoding-type"] == "string-array"
+    back = ad.read_zarr(str(out))
+    assert list(back.obs_names) == ["c1", "c2", "c3"] and list(back.var_names) == ["g1", "g2"]
+
+
+def test_repeated_string_columns_are_written_as_categoricals(tmp_path: Path) -> None:
+    """Same rule as anndata's own writers: strings that repeat become categoricals, strings
+    unique per row (barcodes, ids) stay string arrays, and the caller's frame is untouched."""
+    obs = pd.DataFrame(
+        {"batch": ["b2", "b1", "b2", "b1"], "barcode": ["AAA", "CCC", "GGG", "TTT"]},
+        index=[f"c{i}" for i in range(4)],
+    )
+    adata = ad.AnnData(X=sp.csr_matrix(np.ones((4, 2), dtype=np.float32)), obs=obs)
+    out = tmp_path / "out.zarr"
+    convert_adata(adata, output=str(out), cfg=_cfg("csr"))
+    root = zarr.open_group(str(out), mode="r")
+    assert root["obs/batch"].attrs["encoding-type"] == "categorical"
+    assert [str(c) for c in root["obs/batch/categories"][:]] == ["b1", "b2"]
+    assert root["obs/barcode"].attrs["encoding-type"] != "categorical"
+    assert not isinstance(adata.obs["batch"].dtype, pd.CategoricalDtype)  # input not mutated
+    back = ad.read_zarr(str(out))
+    assert list(back.obs["batch"]) == ["b2", "b1", "b2", "b1"]
+    assert list(back.obs["barcode"]) == ["AAA", "CCC", "GGG", "TTT"]

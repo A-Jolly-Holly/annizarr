@@ -13,7 +13,7 @@ import zarr
 from _readable import assert_anndata_readable
 from annizarr.config import AppConfig, ChunkConfig, IOConfig
 from annizarr.errors import ConversionError, StorageError
-from annizarr.ops import add_expr, append, convert_h5ad, rechunk, sort
+from annizarr.ops import add_expr, append, convert_h5ad, plan_append, rechunk, sort
 
 
 def _cfg(**io):
@@ -265,9 +265,9 @@ def test_append_validation_guards(tmp_path):
     got = ad.read_zarr(str(sa))
     assert got.n_obs == 20 and "conn" in got.obsp
 
-    # categorical dtype/order mismatch
+    # an ordered categorical in the store must be matched exactly (unordered ones grow instead)
     a2, b2 = _adata(n=20, seed=2), _adata(n=10, seed=3)
-    b2.obs["cell_type"] = pd.Categorical(b2.obs["cell_type"], categories=["a", "b", "c"], ordered=True)
+    a2.obs["cell_type"] = pd.Categorical(a2.obs["cell_type"], categories=["a", "b", "c"], ordered=True)
     sa2 = _store(tmp_path, a2, "a2.zarr")
     sb2 = _store(tmp_path, b2, "b2.zarr")
     with pytest.raises(ConversionError, match="categorical dtype mismatch"):
@@ -500,3 +500,68 @@ def test_cli_append_extend_layers(tmp_path):
     assert run(["append", str(sa), str(sb), "--extend-layers", "--drop-derived"]) == 0
     got = ad.read_zarr(str(sa))
     np.testing.assert_allclose(got.layers["gexp"].toarray(), _expected_gexp(sp.vstack([a.X, b.X])), rtol=1e-5)
+
+
+def test_append_reads_nullable_string_index_written_by_anndata(tmp_path):
+    # anndata itself (pandas 3, or dtype="string" on pandas 2) stores the obs index as a
+    # nullable-string-array group; append must read and extend that encoding too
+    a, b = _adata(n=8, seed=0), _adata(n=3, seed=1)
+    for x in (a, b):
+        x.obs.index = x.obs.index.astype("string")
+        x.obsm.clear()
+    sa, sb = tmp_path / "a.zarr", tmp_path / "b.zarr"
+    previous = ad.settings.allow_write_nullable_strings
+    ad.settings.allow_write_nullable_strings = True  # pandas 2 refuses nullable strings unless opted in
+    try:
+        a.write_zarr(sa)
+        b.write_zarr(sb)
+    finally:
+        ad.settings.allow_write_nullable_strings = previous
+    assert not isinstance(zarr.open_group(str(sa), mode="r")["obs/_index"], zarr.Array)
+    plan = plan_append(str(sa), cells=str(sb))
+    assert plan.n_new == 3 and plan.n_duplicate_names == 0
+    append(str(sa), cells=str(sb), cfg=_cfg())
+    got = ad.read_zarr(str(sa))
+    assert got.n_obs == 11 and list(got.obs_names) == [*a.obs_names, *b.obs_names]
+
+
+def test_append_keeps_store_encoding_for_string_like_columns(tmp_path):
+    """The store column's encoding wins: a categorical gains categories for unseen values whether
+    the cells arrive as a differently coded categorical or as plain strings; a plain string column
+    takes categorical cells as strings; an ordered categorical still has to match exactly."""
+    a, b, c = _adata(n=6, seed=0), _adata(n=4, seed=1), _adata(n=3, seed=2)
+    for x in (a, b, c):
+        x.obsm.clear()
+    a.obs["batch"] = pd.Categorical(["b1", "b2", "b1", "b2", "b1", "b2"])
+    a.obs["sample"] = [f"s{i}" for i in range(6)]  # unique per row -> stays a string column on disk
+    b.obs["batch"] = pd.Categorical(["b3", "b2", "b3", "b2"])  # different category set and codes
+    b.obs["sample"] = pd.Categorical(["s9", "s9", "s8", "s8"])  # categorical into a string column
+    c.obs["batch"] = ["b4", "b5", "b6"]  # unique per row -> a string column into a categorical
+    c.obs["sample"] = [f"t{i}" for i in range(3)]
+    sa, sb, sc = (_store(tmp_path, x, f"{n}.zarr") for x, n in ((a, "a"), (b, "b"), (c, "c")))
+    assert zarr.open_group(str(sa), mode="r")["obs/batch"].attrs["encoding-type"] == "categorical"
+    assert zarr.open_group(str(sa), mode="r")["obs/sample"].attrs["encoding-type"] != "categorical"
+
+    plan = plan_append(str(sa), cells=str(sb))
+    assert any("'batch': 1 new category appended (b3)" in n for n in plan.notes), plan.notes
+    append(str(sa), cells=str(sb), cfg=_cfg())
+    append(str(sa), cells=str(sc), cfg=_cfg())
+
+    got = ad.read_zarr(str(sa))
+    assert got.n_obs == 13
+    assert got.obs["batch"].dtype == "category"
+    assert list(got.obs["batch"].cat.categories) == ["b1", "b2", "b3", "b4", "b5", "b6"]
+    assert list(got.obs["batch"]) == [*a.obs["batch"], *b.obs["batch"], *c.obs["batch"]]
+    assert got.obs["sample"].dtype != "category"
+    assert list(got.obs["sample"]) == [*a.obs["sample"], *b.obs["sample"], *c.obs["sample"]]
+    assert list(got.obs["cell_type"].cat.categories) == ["a", "b", "c"]  # untouched when nothing is new
+
+    # ordered categoricals carry meaning in their order: still an exact-match requirement
+    d, e = _adata(n=4, seed=3), _adata(n=2, seed=4)
+    for x in (d, e):
+        x.obsm.clear()
+    d.obs["grade"] = pd.Categorical(["lo", "hi", "lo", "hi"], categories=["lo", "hi"], ordered=True)
+    e.obs["grade"] = pd.Categorical(["mid", "hi"], categories=["lo", "mid", "hi"], ordered=True)
+    sd, se = _store(tmp_path, d, "d.zarr"), _store(tmp_path, e, "e.zarr")
+    with pytest.raises(ConversionError, match="ordered categorical"):
+        plan_append(str(sd), cells=str(se))

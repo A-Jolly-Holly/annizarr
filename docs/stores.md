@@ -13,7 +13,10 @@ writes the `encoding-type` / `encoding-version` attrs itself to match anndata's 
 | raw | `raw` | 0.1.0 |
 
 obs, var, uns, obsm, varm, obsp and varp go through anndata's own `write_elem`, so anything anndata
-can write round-trips, spatial coordinates and images included.
+can write round-trips, spatial coordinates and images included. Before writing, obs and var get the
+same treatment anndata's own writers apply: string columns with repeated values become categoricals
+(unique-per-row strings such as barcodes stay string arrays), and the index is always a plain
+`string-array`, even on pandas 3 where anndata would otherwise emit a nullable-string group.
 
 ## Inputs
 
@@ -63,6 +66,9 @@ Remote targets (`s3://`, `gs://`) require Icechunk; credentials come from the en
 - `append` errors if every appended cell is already present ("already appended?") and only warns
   on a partial overlap, since barcodes legitimately collide across samples. It never drops
   obsm/obsp/layers without consent: it prompts on a terminal, or needs `--drop-derived` in a
-  script. `--extend-layers` extends add-expr CSR layers in place instead of dropping them.
+  script. `--extend-layers` extends add-expr CSR layers in place instead of dropping them. Obs
+  columns keep the store's encoding: a categorical column gains new categories for values it has
+  not seen and re-codes incoming strings or differently coded categoricals against them (ordered
+  categoricals must match exactly); a plain string column accepts categorical cells as strings.
 - `sort` re-derives a lone `layers/gexp` on the sorted output with the layer's own layout and
   chunking.

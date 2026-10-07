@@ -7,7 +7,7 @@ import zarr
 from annizarr._core._config import AppConfig, resolve_backend_cfg
 from annizarr._core._layout import dense_shards, write_grid
 from annizarr._core._runtime import configure_runtime, run_parallel, stage
-from annizarr._core._zarr import get_group, shape_attr
+from annizarr._core._zarr import get_group, has_element, shape_attr
 from annizarr._storage import check_output_target, open_input_group, open_output_store, store_name
 from annizarr._writers._encoding import sparse_shards, suppress_autoshard_warning
 from annizarr.errors import ConversionError
@@ -70,7 +70,7 @@ def rechunk(
     matrix_keys = ["X"]
     if "layers" in src:
         matrix_keys += [f"layers/{k}" for k in get_group(src, "layers")]
-    if "raw" in src and "X" in get_group(src, "raw"):
+    if has_element(src, "raw") and "X" in get_group(src, "raw"):
         matrix_keys.append("raw/X")
     if matrix not in matrix_keys:
         raise ConversionError(f"matrix '{matrix}' is not a matrix element ({matrix_keys}).")
@@ -104,7 +104,7 @@ def rechunk(
                             _copy_matrix(node, dst, f"{key}/{child}", cfg, rechunk=False)
                         else:
                             write_elem(g, child, read_elem(node))
-                if "raw" in src:
+                if has_element(src, "raw"):
                     src_raw = get_group(src, "raw")
                     raw = dst.require_group("raw")
                     raw.attrs.update(dict(src_raw.attrs))

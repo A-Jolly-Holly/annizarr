@@ -12,6 +12,7 @@ license = "MIT"
 authors = [{ name = "Alex Holly", email = "alex.holly@alleninstitute.org" }]
 dependencies = [
   "anndata>=0.13",  # 0.13 lists X in .layers under None
+  "pandas>=2.3",  # imported directly (frame prep, append); floor matches anndata's
   "zarr>=3.3",
   "numpy>=1.24",
   "scipy>=1.10",

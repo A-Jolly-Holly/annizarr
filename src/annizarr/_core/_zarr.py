@@ -34,6 +34,16 @@ def get_group(group: zarr.Group, key: str) -> zarr.Group:
         raise ConversionError(f"'{key}' is not a group in '{group.path or '/'}': {exc}") from exc
 
 
+def is_null(node: zarr.Array[Any] | zarr.Group) -> bool:
+    """anndata>=0.13 stores a ``None`` element (``raw`` most often) as a 0-d array tagged ``null``."""
+    return isinstance(node, zarr.Array) and node.attrs.get("encoding-type") == "null"
+
+
+def has_element(group: zarr.Group, key: str) -> bool:
+    """``key`` is present in ``group`` and is not anndata's ``null`` placeholder."""
+    return key in group and not is_null(group[key])
+
+
 # `.attrs` is a MutableMapping[str, JSON] (zarr.core.attributes.Attributes), so reading a
 # specific, encoding-contract-known shape (a 2-tuple, a string, a string list) out of it is a
 # cast, not a real union — the anndata-zarr encoding guarantees the shape, mypy cannot.

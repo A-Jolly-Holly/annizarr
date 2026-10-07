@@ -4,6 +4,7 @@ import warnings
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
+import pandas as pd
 from anndata._io.specs import write_elem  # private API; checked against anndata 0.13.4
 
 if TYPE_CHECKING:
@@ -11,7 +12,7 @@ if TYPE_CHECKING:
 
     import zarr
 
-__all__ = ["autoshard_setting", "sparse_shards", "suppress_autoshard_warning", "write_elem"]
+__all__ = ["autoshard_setting", "prepare_frame", "sparse_shards", "suppress_autoshard_warning", "write_elem"]
 
 ARRAY_ENCODING_TYPE = "array"
 ARRAY_ENCODING_VERSION = "0.2.0"
@@ -22,6 +23,25 @@ RAW_ENCODING_VERSION = "0.1.0"
 CSR_ENCODING_TYPE = "csr_matrix"
 CSC_ENCODING_TYPE = "csc_matrix"
 SPARSE_ENCODING_VERSION = "0.1.0"
+
+
+def prepare_frame(df: pd.DataFrame) -> pd.DataFrame:
+    """A shallow copy of ``df`` laid out the way anndata's own writers store a frame.
+
+    String columns whose values repeat become categoricals, by the same rule
+    ``AnnData.write_zarr``/``write_h5ad`` apply (``strings_to_categoricals``: a column stays a
+    string array only when every value is unique, e.g. barcodes or ids). The index is coerced
+    to object dtype so it is written as a plain ``string-array`` on every pandas version;
+    pandas>=3's ``str`` index would otherwise become a nullable-string group. The caller's
+    frame is left untouched.
+    """
+    import anndata as ad
+
+    out = df.copy(deep=False)
+    if isinstance(out.index.dtype, pd.StringDtype):
+        out.index = out.index.astype(object)
+    ad.AnnData().strings_to_categoricals(out)  # converts columns on the copy, in place
+    return out
 
 
 def set_array_attrs(arr: zarr.Array[Any]) -> None:
