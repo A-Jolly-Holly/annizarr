@@ -7,29 +7,27 @@ name = "annizarr"
 dynamic = ["version"]
 description = "AnnData zarr stores: convert, edit, and version with Icechunk"
 readme = "README.md"
-requires-python = ">=3.12"  # zarr>=3.3 itself needs >=3.12 (verified: every zarr 3.2+ release); anndata<0.13 alone would allow 3.11
+requires-python = ">=3.12"  # zarr>=3.3 needs >=3.12
 license = "MIT"
 authors = [{ name = "Alex Holly", email = "alex.holly@alleninstitute.org" }]
 dependencies = [
-  "anndata>=0.12.10,<0.13",   # <0.13: phantom None layer key breaks the layer writer (issue link TBD)
-  "zarr>=3.3,<4",
+  "anndata>=0.13",  # 0.13 lists X in .layers under None
+  "pandas>=2.3",  # imported directly (frame prep, append); floor matches anndata's
+  "zarr>=3.3",
   "numpy>=1.24",
   "scipy>=1.10",
   "h5py>=3.8",
-  "PyYAML>=6",
 ]
-# floors match the vendored ground truth (zarr 3.3.0, icechunk 2.1.2); ceilings verified
-# clean through zarr 3.4.0 / icechunk 2.2.2 / numpy 2.5.3
+# lower bounds only: the floors are the versions the writers were verified against
 
 [project.optional-dependencies]
-icechunk = ["icechunk>=2.1.2,<3", "boto3>=1.28"]
+icechunk = ["icechunk>=2.1.2", "boto3>=1.28"]
 dev = [
   "pytest>=8",
   "pytest-cov",
   "hypothesis",
   "ruff",
   "mypy",
-  "types-PyYAML",
   "moto[s3,server]>=5",  # server: ThreadedMotoServer, needed by tests/test_ic_copy_s3.py
   "scanpy>=1.10",
   "build",

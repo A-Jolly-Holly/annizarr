@@ -48,18 +48,16 @@ def _write_10x_v3(path: Path, dense: np.ndarray) -> None:
         feat.create_dataset("feature_type", data=np.array([b"Gene Expression"] * N_VARS))
 
 
-@pytest.mark.parametrize("x_storage", ["dense", "csr", "csc"])
+@pytest.mark.parametrize("layout", ["dense", "csr", "csc"])
 @pytest.mark.parametrize(
     "mix",
     ["dense_csr", "csr_csc", "dense_csr_lazy", "dense_csr_eager", "tenx_h5ad"],
 )
-def test_concat_matrix_grid(tmp_path: Path, mix: str, x_storage: str) -> None:
+def test_concat_matrix_grid(tmp_path: Path, mix: str, layout: str) -> None:
     a_dense = _block(1, N_OBS_A)
     b_dense = _block(2, N_OBS_B)
     a_path, b_path = tmp_path / "a.in", tmp_path / "b.in"
-    cfg = AppConfig(
-        io=IOConfig(x_storage=x_storage), chunks=ChunkConfig(x_row_chunk=4, x_col_chunk=3, sparse_flat_chunk=5)
-    )
+    cfg = AppConfig(io=IOConfig(layout=layout), chunks=ChunkConfig(row_chunk=4, col_chunk=3, nnz_chunk=5))
 
     if mix == "dense_csr":
         _write_h5ad(a_path, a_dense, "dense", obs_prefix="a")
@@ -71,12 +69,12 @@ def test_concat_matrix_grid(tmp_path: Path, mix: str, x_storage: str) -> None:
         # explicit lazy=True (no more auto-select): both inputs stream band-by-band.
         _write_h5ad(a_path, a_dense, "dense", obs_prefix="a")
         _write_h5ad(b_path, b_dense, "csr", obs_prefix="b")
-        cfg = AppConfig(io=IOConfig(x_storage=x_storage, lazy=True), chunks=cfg.chunks)
+        cfg = AppConfig(io=IOConfig(layout=layout, lazy=True), chunks=cfg.chunks)
     elif mix == "dense_csr_eager":
         # explicit lazy=False: both inputs load whole into memory first.
         _write_h5ad(a_path, a_dense, "dense", obs_prefix="a")
         _write_h5ad(b_path, b_dense, "csr", obs_prefix="b")
-        cfg = AppConfig(io=IOConfig(x_storage=x_storage, lazy=False), chunks=cfg.chunks)
+        cfg = AppConfig(io=IOConfig(layout=layout, lazy=False), chunks=cfg.chunks)
     else:  # tenx_h5ad
         _write_10x_v3(a_path, a_dense)
         _write_h5ad(b_path, b_dense, "csr", obs_prefix="b")
@@ -94,4 +92,4 @@ def test_concat_matrix_grid(tmp_path: Path, mix: str, x_storage: str) -> None:
         assert list(got.obs_names) == [f"a{i}" for i in range(N_OBS_A)] + [f"b{i}" for i in range(N_OBS_B)]
 
     root = zarr.open_group(str(out), mode="r")
-    assert root["X"].attrs["encoding-type"] == _ENCODING[x_storage]
+    assert root["X"].attrs["encoding-type"] == _ENCODING[layout]

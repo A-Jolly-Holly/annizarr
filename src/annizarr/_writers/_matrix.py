@@ -15,11 +15,11 @@ __all__ = ["write_matrix"]
 
 
 def write_matrix(group: zarr.Group, key: str, reader: Reader, cfg: AppConfig) -> None:
-    # dispatches purely on cfg.io.x_storage; the reader's backing kind never matters here
+    # dispatches purely on cfg.io.layout; the reader's backing kind never matters here
     # (only Reader.thread_safe, inside each writer, for the parallel-mode choice).
-    if cfg.io.x_storage == "dense":
+    if cfg.io.layout == "dense":
         write_dense(group, key, reader, cfg)
-    elif cfg.io.x_storage == "csr":
+    elif cfg.io.layout == "csr":
         write_csr(group, key, reader, cfg)
     else:
         write_csc(group, key, reader, cfg)

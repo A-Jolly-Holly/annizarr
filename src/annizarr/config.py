@@ -6,9 +6,7 @@ from annizarr._core._config import (
     ConcatConfig,
     GroupingConfig,
     IOConfig,
-    ValidationConfig,
     apply_cli_overrides,
-    load_config,
 )
 
 __all__ = [
@@ -17,7 +15,5 @@ __all__ = [
     "ConcatConfig",
     "GroupingConfig",
     "IOConfig",
-    "ValidationConfig",
     "apply_cli_overrides",
-    "load_config",
 ]

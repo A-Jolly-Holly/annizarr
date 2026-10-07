@@ -9,10 +9,10 @@ from typing import TYPE_CHECKING, Literal
 
 import anndata as ad
 
-from annizarr._core._config import AppConfig, load_config, resolve_backend_cfg
+from annizarr._core._config import AppConfig, resolve_backend_cfg
 from annizarr._core._runtime import configure_runtime
 from annizarr._core._sorting import _write_sorted_lazy, maybe_sort_adata
-from annizarr._core._validation import validate_single_cell_anndata
+from annizarr._core._validation import require_matrix
 from annizarr._sources import close_lazy_if_needed, detect_format, load_10x_h5, load_h5ad, open_source
 from annizarr._storage import check_output_target, open_output_store, store_name
 from annizarr._writers import write_adata
@@ -48,14 +48,12 @@ def write_adata_to_store(
     elif cfg.grouping.enabled:
         raise ConversionError("grouping (sort_by) is only supported by convert for now.")
 
-    validation_result = validate_single_cell_anndata(adata, cfg.validation)
-    for w in validation_result.warnings:
-        logger.warning(w)
+    require_matrix(adata)
     ad.settings.zarr_write_format = 3
 
     logger.info(
         f"Converting → {output_path} (n_obs={adata.n_obs}, n_vars={adata.n_vars}, "
-        f"{cfg.io.x_storage}, backend={cfg.io.backend})"
+        f"{cfg.io.layout}, backend={cfg.io.backend})"
     )
     t0 = time.perf_counter()
     commit_message = message or f"annizarr convert → {store_name(output_path)}"
@@ -82,7 +80,7 @@ def convert_adata(
 ) -> OpResult:
     """Write an AnnData (in-memory or already backed) to a zarr (or icechunk) store."""
     if cfg is None:
-        cfg = load_config()
+        cfg = AppConfig()
     cfg = replace(cfg, io=replace(cfg.io, lazy=adata.isbacked))
     check_output_target(output, cfg)
     return write_adata_to_store(adata, output, cfg, allow_grouping=True, branch=branch, message=message)
@@ -98,7 +96,7 @@ def convert_h5ad(
 ) -> OpResult:
     """Convert a .h5ad file to zarr."""
     if cfg is None:
-        cfg = load_config()
+        cfg = AppConfig()
     cfg = resolve_backend_cfg(cfg)  # before check_output_target's Repo.exists(), a heavier check
     check_output_target(output, cfg)
     adata = None
@@ -126,7 +124,7 @@ def convert_10x_h5(
 ) -> OpResult:
     """Convert a 10x Cell Ranger .h5 to zarr; expects CSR from the 10x load."""
     if cfg is None:
-        cfg = load_config()
+        cfg = AppConfig()
     check_output_target(output, cfg)
     try:
         adata = load_10x_h5(path)
@@ -163,7 +161,7 @@ def convert(
     output
         Destination store path or URI.
     cfg
-        Resolved configuration; ``None`` loads :func:`~annizarr.config.load_config` defaults.
+        Resolved configuration; ``None`` uses the :class:`~annizarr.config.AppConfig` defaults.
     fmt
         ``"h5ad"`` or ``"10x"``, overriding content detection for a single input; ignored
         for an AnnData input or a multi-input concat.
@@ -184,7 +182,7 @@ def convert(
         (use rechunk or sort instead).
     """
     if cfg is None:
-        cfg = load_config()
+        cfg = AppConfig()
 
     if isinstance(inputs, ad.AnnData):
         return convert_adata(inputs, output=output, cfg=cfg, branch=branch, message=message)

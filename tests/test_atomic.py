@@ -14,7 +14,7 @@ from annizarr.config import AppConfig, ChunkConfig, IOConfig
 from annizarr.errors import ConversionError, StorageError
 from annizarr.ops import convert_h5ad, sort
 
-_CHUNKS = ChunkConfig(x_row_chunk=16, x_col_chunk=4, sparse_flat_chunk=64)
+_CHUNKS = ChunkConfig(row_chunk=16, col_chunk=4, nnz_chunk=64)
 
 
 def _cfg(**io) -> AppConfig:

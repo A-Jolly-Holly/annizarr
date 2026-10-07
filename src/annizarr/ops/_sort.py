@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from annizarr._core._config import AppConfig, load_config, resolve_backend_cfg
+from annizarr._core._config import AppConfig, resolve_backend_cfg
 from annizarr._core._sorting import stream_sorted_store
-from annizarr._core._zarr import get_group
+from annizarr._core._zarr import get_group, has_element
 from annizarr._storage import check_output_target, is_remote, open_input_group, store_name
 from annizarr.errors import ConversionError
 from annizarr.ops._result import OpResult
@@ -16,7 +17,7 @@ if TYPE_CHECKING:
 
     import zarr
 
-    from annizarr.typing import PathLike, XStorage
+    from annizarr.typing import Layout, PathLike
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +42,7 @@ def sort(
     by
         Obs column name(s) to sort by, primary key first.
     cfg
-        Resolved configuration; ``None`` loads :func:`~annizarr.config.load_config` defaults.
+        Resolved configuration; ``None`` uses the :class:`~annizarr.config.AppConfig` defaults.
     branch
         Icechunk branch to write ``output`` to; created off the current tip if it
         doesn't exist yet. Ignored for plain zarr.
@@ -65,15 +66,15 @@ def sort(
     from annizarr.ops._expr import introspect_gexp, write_expr_layer
 
     if cfg is None:
-        cfg = load_config()
+        cfg = AppConfig()
     cfg = resolve_backend_cfg(cfg)
     by = tuple(by)
     if is_remote(output):
         raise ConversionError("sort streams through local temp stores; a remote output is not supported yet.")
     if not by:
         raise ConversionError("sort requires by=[OBS_COLUMN, ...].")
-    if cfg.io.x_storage != "csr":
-        raise ConversionError(f"sort supports x_storage='csr' only (got '{cfg.io.x_storage}').")
+    if cfg.io.layout != "csr":
+        raise ConversionError(f"sort supports layout='csr' only (got '{cfg.io.layout}').")
     check_output_target(output, cfg)
 
     src = open_input_group(store)
@@ -89,7 +90,7 @@ def sort(
     elif layer_keys:
         raise ConversionError(f"sort does not reorder layers {layer_keys}; only a gexp layer is re-derived.")
     for key in ("raw", "obsp"):
-        if key in src and len(list(get_group(src, key))) > 0:
+        if has_element(src, key) and len(list(get_group(src, key))) > 0:
             raise ConversionError(f"sort does not reorder {key} yet; drop it or sort at convert time.")
 
     def _read(key: str) -> Any:
@@ -101,18 +102,19 @@ def sort(
 
     after_write = None
     if gexp_params is not None:
-        fmt, chunk_elems, target_sum = gexp_params
+        layout, flat_chunk, target_sum = gexp_params
         if target_sum is None:
             logger.warning("layers/gexp has no recorded target_sum; re-deriving at 1e4.")
             target_sum = 1e4
+        # pin the existing layer's flat chunk through nnz_chunk (axis chunks cleared) so the
+        # re-derived layer is laid out like the original
+        layer_cfg = replace(cfg, chunks=replace(cfg.chunks, row_chunk=None, col_chunk=None, nnz_chunk=flat_chunk))
 
-        def after_write(
-            root: zarr.Group, fmt: XStorage = fmt, chunk_elems: int = chunk_elems, target_sum: float = target_sum
-        ) -> None:
+        def after_write(root: zarr.Group, layout: Layout = layout, target_sum: float = target_sum) -> None:
             # re-derives gexp before stream_sorted_store's finalize(), so it lands in the
             # same icechunk commit rather than a separate add_expr call afterwards.
-            write_expr_layer(root, cfg, fmt=fmt, chunk_elems=chunk_elems, target_sum=target_sum)
-            logger.warning(f"layers/gexp re-derived ({fmt}) on the sorted store.")
+            write_expr_layer(root, layer_cfg, layout=layout, target_sum=target_sum)
+            logger.warning(f"layers/gexp re-derived ({layout}) on the sorted store.")
 
     snapshot_id = stream_sorted_store(
         x,

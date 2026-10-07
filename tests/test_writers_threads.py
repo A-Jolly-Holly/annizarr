@@ -26,7 +26,7 @@ import annizarr._core._layout as _layout
 from _readable import assert_anndata_readable
 from annizarr._core._runtime import run_parallel
 from annizarr._writers._sparse import flat_segments
-from annizarr.config import AppConfig, ChunkConfig, IOConfig, ValidationConfig
+from annizarr.config import AppConfig, ChunkConfig, IOConfig
 from annizarr.ops import append, concat, convert_adata, rechunk
 
 
@@ -83,24 +83,23 @@ def _adata(dense: np.ndarray, *, sparse: bool, seed: int) -> ad.AnnData:
 
 
 def _cfg(
-    x_storage: str,
+    layout: str,
     *,
     cpus: int,
     row_chunk: int = 64,
     col_chunk: int = 48,
     flat_chunk: int = 500,
-    x_shard_factor: int = 1,
+    shard_factor: int = 1,
 ) -> AppConfig:
     return AppConfig(
-        io=IOConfig(overwrite=True, x_storage=x_storage),
+        io=IOConfig(overwrite=True, layout=layout),
         chunks=ChunkConfig(
-            x_row_chunk=row_chunk,
-            x_col_chunk=col_chunk,
-            sparse_flat_chunk=flat_chunk,
+            row_chunk=row_chunk,
+            col_chunk=col_chunk,
+            nnz_chunk=flat_chunk,
             cpus=cpus,
-            x_shard_factor=x_shard_factor,
+            shard_factor=shard_factor,
         ),
-        validation=ValidationConfig(),
     )
 
 
@@ -146,7 +145,7 @@ def _n_flat_shard_objects(store: Path, path: str) -> int:
 def _forced_autoshard(flat_chunk: int, itemsize: int, chunks_per_shard: int):
     """Context manager pinning zarr's ``shards="auto"`` heuristic to an exact, known shard
     multiple of ``flat_chunk`` (rather than relying on its size-derived default), so a forced-
-    sharding test gets a shard several chunks wide while ``cfg.chunks.sparse_flat_chunk`` stays
+    sharding test gets a shard several chunks wide while ``cfg.chunks.nnz_chunk`` stays
     small. See ``zarr.core.chunk_grids._guess_num_chunks_per_axis_shard``: with
     ``target_shard_size_bytes`` set, chunks accumulate into a shard while
     ``bytes_per_chunk * (k+1) <= target``; sizing the target to exactly
@@ -158,7 +157,7 @@ def _forced_autoshard(flat_chunk: int, itemsize: int, chunks_per_shard: int):
 
 
 @pytest.mark.parametrize(
-    ("path", "x_storage", "sparse_source"),
+    ("path", "layout", "sparse_source"),
     [
         pytest.param("direct", "dense", False, id="dense_from_dense"),
         pytest.param("direct", "dense", True, id="sparse_to_dense"),
@@ -169,7 +168,7 @@ def _forced_autoshard(flat_chunk: int, itemsize: int, chunks_per_shard: int):
     ],
 )
 def test_cpus1_matches_cpus4_byte_identical(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, path: str, x_storage: str, sparse_source: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, path: str, layout: str, sparse_source: bool
 ) -> None:
     """Every in-memory writer path (direct convert, or concat across 3 non-chunk-aligned
     inputs) must write byte-identical stores at cpus=1 vs cpus=4 -- force several flat
@@ -180,8 +179,8 @@ def test_cpus1_matches_cpus4_byte_identical(
     if path == "direct":
         dense = _rand_dense(N_OBS, N_VARS, seed=3, density=0.25)
         adata = _adata(dense, sparse=sparse_source, seed=3)
-        convert_adata(adata, output=out1, cfg=_cfg(x_storage, cpus=1))
-        convert_adata(adata, output=out4, cfg=_cfg(x_storage, cpus=4))
+        convert_adata(adata, output=out1, cfg=_cfg(layout, cpus=1))
+        convert_adata(adata, output=out4, cfg=_cfg(layout, cpus=4))
     else:
         # inputs of 70+130+100 rows seam at 70 and 200 -- neither a multiple of row_chunk=64,
         # so every seam falls strictly inside an output chunk (the old per-file writer needed
@@ -195,8 +194,8 @@ def test_cpus1_matches_cpus4_byte_identical(
             _adata(part, sparse=True, seed=10 + i).write_h5ad(h5)
             paths.append(str(h5))
         dense = np.vstack(parts)
-        cfg1 = _cfg(x_storage, cpus=1, row_chunk=64, col_chunk=n_vars, flat_chunk=500)
-        cfg4 = _cfg(x_storage, cpus=4, row_chunk=64, col_chunk=n_vars, flat_chunk=500)
+        cfg1 = _cfg(layout, cpus=1, row_chunk=64, col_chunk=n_vars, flat_chunk=500)
+        cfg4 = _cfg(layout, cpus=4, row_chunk=64, col_chunk=n_vars, flat_chunk=500)
         concat(paths, output=out1, cfg=cfg1)
         concat(paths, output=out4, cfg=cfg4)
 
@@ -224,9 +223,7 @@ def test_sharded_dense_concat_seam_inside_shard_cpus1_matches_cpus4(
     outs: dict[int, Path] = {}
     for cpus in (1, 4):
         out = tmp_path / f"out_cpus{cpus}.zarr"
-        cfg = _cfg(
-            "dense", cpus=cpus, row_chunk=SHARD_ROW_CHUNK, col_chunk=SHARD_COL_CHUNK, x_shard_factor=SHARD_FACTOR
-        )
+        cfg = _cfg("dense", cpus=cpus, row_chunk=SHARD_ROW_CHUNK, col_chunk=SHARD_COL_CHUNK, shard_factor=SHARD_FACTOR)
         concat(paths, output=out, cfg=cfg)
         np.testing.assert_array_equal(_read_x(out), expected)
         assert_anndata_readable(out)
@@ -247,14 +244,13 @@ AUTOSHARD_ITEMSIZE = 4  # float32 data / int32 indices — same itemsize, same s
 
 def _autoshard_cfg(*, cpus: int) -> AppConfig:
     return AppConfig(
-        io=IOConfig(overwrite=True, x_storage="csr"),
-        chunks=ChunkConfig(sparse_flat_chunk=AUTOSHARD_FLAT_CHUNK, cpus=cpus, auto_shard=True),
-        validation=ValidationConfig(),
+        io=IOConfig(overwrite=True, layout="csr"),
+        chunks=ChunkConfig(nnz_chunk=AUTOSHARD_FLAT_CHUNK, cpus=cpus, auto_shard=True),
     )
 
 
 def test_forced_autoshard_sparse_write_cpus1_matches_cpus4(tmp_path: Path) -> None:
-    """auto_shard=True with sparse_flat_chunk pinned small; zarr's shard-size heuristic is
+    """auto_shard=True with nnz_chunk pinned small; zarr's shard-size heuristic is
     pinned (via target_shard_size_bytes) to exactly 4 chunks/shard, so data/indices land on a
     shard grid several chunks wide while cfg still asks for small chunks. cpus=1 vs cpus=4 must
     still write byte-identical stores, with one shard object per shard on disk (no RMW). Also
@@ -337,7 +333,7 @@ def test_rechunk_recreates_sharded_sparse_array(tmp_path: Path) -> None:
     with _forced_autoshard(AUTOSHARD_FLAT_CHUNK, AUTOSHARD_ITEMSIZE, AUTOSHARD_CHUNKS_PER_SHARD):
         for cpus in (1, 4):
             out = tmp_path / f"out_cpus{cpus}.zarr"
-            rechunk(src, output=out, array="X", cfg=_autoshard_cfg(cpus=cpus))
+            rechunk(src, output=out, matrix="X", cfg=_autoshard_cfg(cpus=cpus))
             outs[cpus] = out
 
     for out in outs.values():

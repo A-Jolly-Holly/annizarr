@@ -1,112 +1,113 @@
 # AnniZarr
 
+[![CI](https://github.com/A-Jolly-Holly/annizarr/actions/workflows/ci.yml/badge.svg)](https://github.com/A-Jolly-Holly/annizarr/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/annizarr)](https://pypi.org/project/annizarr/)
+
 Convert, edit, and version AnnData Zarr stores — streaming, memory-bounded, and
 Icechunk-versioned.
 
 ## Install
 
-Not yet on PyPI — install from this directory:
+Not yet on PyPI — install from this directory. `annizarr` and the shorter `anz` are the same command.
 
 ```bash
-pip install .             
-pip install ".[icechunk]"   
-#OR
-pixi install   
+pip install .
+pip install ".[icechunk]"
 ```
 
-## Quickstart
+Or use the pixi dev environment:
 
 ```bash
-# convert: format is sniffed from HDF5 contents (h5ad vs 10x); override with --from
+pixi install
+```
+
+## Quickstart usage
+
+### Convert
+
+The input format is sniffed from the HDF5 contents (h5ad vs 10x); `--from h5ad|10x` overrides it. Configuration can enable chunking, sharding, format ...
+Two or more inputs are concatenated. `--ic` writes an Icechunk repository instead of plain zarr.
+
+```bash
 annizarr convert sample.h5ad -o sample.zarr
 
-# two or more inputs = concat
 annizarr convert a.h5ad b.h5ad -o merged.zarr
-
-# rewrite X with new chunking; everything else streams through unchanged
-annizarr rechunk merged.zarr -o rechunked.zarr --x-row-chunk 2000
-
-# physically sort rows by obs column(s) into a new store
-annizarr sort merged.zarr -o sorted.zarr --by cell_type
-
-# append cells in place; errors if it would drop obsm/obsp/layers unless you consent
-annizarr append sorted.zarr more_cells.zarr --drop-derived -y
-
-# add a log-normalized layer (layers/gexp) derived from CSR X, CSC layer for visualization
-annizarr add-expr merged.zarr --format csr
-
-# --- Icechunk: same ops, but each one lands as a commit ---
 annizarr convert sample.h5ad -o repo.icechunk --ic -m "initial import"
-annizarr add-expr repo.icechunk --format csr -m "add lognorm layer" --branch dev
-# history, branches, cherry-picks and copies live in the Python API (annizarr.ic.Repo, below)
 ```
 
-## How stores are written
+### Zarr operations and edits
 
-Every store is **anndata-readable** zarr v3: root/array/sparse-group `encoding-type` /
-`encoding-version` attrs are set by hand to match anndata 0.12.x's on-disk spec. Inputs stream
-band by band (lazy) by default, so every op is bounded by memory regardless of store size;
-`--eager` loads the whole input first, which is faster for small files. Band workers default to
-all cores (`--cpus N` to limit). Any input layout (dense, CSR, CSC; eager or lazy) writes any
-`--x-storage`, and a multi-input `convert` may mix h5ad and 10x inputs of different layouts.
-`convert`/`rechunk`/`sort` write a new store to a sibling
-`OUT.tmp-<uuid>`, verify it opens, then atomically rename onto the target — a killed run never
-leaves a partial store at the destination. On Icechunk, each op is exactly one commit.
-Idempotency: `add-expr` on a store that already has the layer errors unless `--overwrite`;
-`append` errors if every appended obs name is already present ("already appended?") and only
-warns on partial overlap (barcodes legitimately collide across samples). `--x-storage
-csr|csc|dense` picks X's on-disk layout — CSR for row-wise/cuML access, CSC/dense for column
-queries.
+`rechunk` rewrites one matrix with new chunking and streams everything else through unchanged.<br>
+`sort` physically orders rows by obs column(s) into a new store.<br> `append` adds cells to an existing zarr/ic store; it prompts before dropping obsm/obsp/layers (`--drop-derived` consents up front)<br>
+`add-expr` adds a log-normalized layer (`layers/gexp`) derived from X/. Csc by default for fast column reads
 
-## Configuration
+```bash
+annizarr rechunk merged.zarr -o rechunked.zarr --row-chunk 2000
 
-Find CLI flags for commands with `annizarr <command> --help`
+annizarr sort merged.zarr -o sorted.zarr --by cell_type
+annizarr append sorted.zarr more_cells.zarr --drop-derived
 
-Defaults < config file < CLI flags. See [`example_config.toml`](example_config.toml) for every
-`[io]`/`[chunks]`/`[validation]`/`[grouping]`/`[concat]` key; pass it with `--config FILE`.
+annizarr add-expr merged.zarr --layout csr
+annizarr add-expr repo.icechunk --layout csr --branch dev -m "add lognorm layer"
+```
 
-## Compatibility
+Icechunk history, branches, cherry-picks live in the Python API `annizarr.Repo` below
 
-| Requirement | Constraint | Why |
-|---|---|---|
-| Python | `>=3.12` | every `zarr>=3.2` release and every icechunk wheel require it |
-| anndata | `>=0.12.10,<0.13` | a phantom `None` layer key on `>=0.13` breaks the layer writer (upstream issue TBD) |
-| zarr | `>=3.3,<4`, v3 only | uses v3-only APIs (`create_array`, `shards=`, `compressors=`) |
-| icechunk | optional, `>=2.1.2,<3` | `pip install "annizarr[icechunk]"` |
-| S3 | optional, bundled with `icechunk` extra (`boto3>=1.28`) | `pip install "annizarr[icechunk]"`; `Repo.copy` supports local and `s3://` only |
-| GCS | `gs://` repos open/read/write via icechunk; `anonymous=True` for public buckets | no `Repo.copy` to/from `gs://` |
+## Configuration and zarr stores
 
+Every flag is documented in `annizarr <command> --help`; [docs/cli.md](docs/cli.md) has the same
+reference in one place. Inputs stream band by band by default, so memory stays bounded at any store
+size (`--eager` loads the whole input first, faster for small files), and matrix writes use every
+core unless `--cpus` says otherwise.
+
+Some of the main options; the docs have all of them:
+
+- `--cpus N` — parallel band workers (default: all cores). Every command.
+- `--layout csr|csc|dense` — on-disk layout of the matrix being written. Default `csr` for X on
+  `convert`, `csc` for the `add-expr` layer. CSR suits row-wise access, CSC and dense column queries.
+- `--row-chunk N`, `--col-chunk N` — chunk shape. Exact rows and columns for dense; for sparse, about
+  N cells (csr) or N genes (csc) per chunk, sized from the average nonzeros. Defaults: 2048 for dense,
+  about 9,000,000 nonzeros for sparse. `convert`, `rechunk`, `add-expr`.
+- `--auto-shard` — shard the 1-D sparse arrays and anndata-written elements with zarr's automatic
+  shard shape (default: off). Every command but `append`.
+- `--ic` — write through an Icechunk repository; `--branch B` and `-m MSG` pick the branch and commit
+  message. `append` and `add-expr` detect an existing repo on their own. `convert`, `rechunk`, `sort`.
+- `--sort-by COL…` on `convert` / `--by COL…` on `sort` — physically order rows by obs columns,
+  primary key first
+
+**What gets written.** Every store is anndata-readable zarr v3 with `encoding-type`/`encoding-version`
+attrs matching anndata 0.13's on-disk spec. X and layers may be dense, CSR or CSC on input (h5ad or
+10x, mixed across inputs) and are written in whatever `--layout` asks for; X defaults to CSR.
+`convert`/`rechunk`/`sort` write to a sibling temp store, verify it opens, then rename it onto the
+target, so a killed run never leaves a partial store. On Icechunk every op is exactly one commit,
+and remote (`s3://`, `gs://`) outputs require it. More in [docs/stores.md](docs/stores.md).
 
 ## Python API for Icechunk usage
+
+The full Python API, including the config dataclasses and the ops functions, is in
+[docs/python-api.md](docs/python-api.md).
 
 ```python
 import annizarr as az
 
-result = az.convert("sample.h5ad", output="sample.zarr")  # -> OpResult
-az.add_expr("sample.zarr", fmt="csr")
-plan = az.plan_append("sample.zarr", cells="more_cells.zarr")  # pure: metadata only
-az.append("sample.zarr", cells="more_cells.zarr", drop_derived=True)
+repo = az.Repo("repo.icechunk")
 
-repo = az.Repo("repo.icechunk")  # opens on main; Repo(path, branch="dev") pins a branch
 repo.branches()
 repo.log()
-repo.tree()  # git-style reprs in a notebook
+repo.tree()
+
 root = repo.open_zarr("w")
 root.attrs["step"] = "lognorm"
 repo.commit("normalize")
+
 repo.checkout("experiment", create=True)  # switches this object only; nothing is persisted
-old = repo.open_zarr("r", snapshot_id=repo.log()[1].id)  # time-travel, read-only
-az.Repo("gs://bucket/store", anonymous=True)  # public bucket, no credentials
-repo.copy("/work/store")  # clone with every branch and snapshot id intact
+old = repo.open_zarr("r", snapshot_id=repo.log()[1].id)
 
-from annizarr import sources
-
-sources.register_source("my_kind", my_loader, sniffer=my_sniffer)  # extension point
+repo.copy("/work/store")  # clone with every branch and snapshot id intact, good for readonly cases
 ```
 
 `OpResult(path, n_obs, n_vars, snapshot_id)` — `snapshot_id` is `None` for plain zarr,
 the committed Icechunk snapshot id otherwise.
-
 
 ## Development
 

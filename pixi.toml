@@ -5,11 +5,11 @@ platforms = ["osx-arm64", "osx-64", "linux-64", "linux-aarch64"]
 
 [dependencies]
 python = ">=3.12,<3.14"
-anndata = ">=0.12.10,<0.13"
-zarr = ">=3.3,<4"
+anndata = ">=0.13"
+pandas = ">=2.3"
+zarr = ">=3.3"
 scipy = ">=1.10"
 h5py = ">=3.8"
-pyyaml = ">=6"
 
 [pypi-dependencies]
 annizarr = { path = ".", editable = true }
@@ -22,17 +22,16 @@ hypothesis = "*"
 [feature.py312.dependencies]
 # floor env: 3.12 is the oldest python zarr>=3.3 supports
 python = "3.12.*"
-icechunk = ">=2.1.2,<3"
+icechunk = ">=2.1.2"
 boto3 = ">=1.28"
 
 [feature.dev.dependencies]
 ruff = "*"
 mypy = "*"
-types-pyyaml = "*"
 moto = ">=5"
 boto3 = ">=1.28"
-icechunk = ">=2.1.2,<3"
-scanpy = ">=1.12.1,<2"  # dev only: reference for the h5py 10x reader test
+icechunk = ">=2.1.2"
+scanpy = ">=1.12.1"  # dev only: reference for the h5py 10x reader test
 python-build = "*"
 twine = "*"
 pre-commit = "*"

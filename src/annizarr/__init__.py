@@ -14,7 +14,7 @@ pin_blas()  # OpenBLAS reads the thread env vars at import, so this runs before 
 logging.getLogger(__name__).addHandler(logging.NullHandler())  # quiet by default; the CLI adds its own handler
 
 if TYPE_CHECKING:
-    from annizarr._core._config import AppConfig, load_config
+    from annizarr._core._config import AppConfig
     from annizarr.ic import Repo
     from annizarr.ops import AppendPlan, OpResult, add_expr, append, convert, plan_append, rechunk, sort
 
@@ -35,7 +35,6 @@ __all__ = [
     "convert",
     "errors",
     "ic",
-    "load_config",
     "ops",
     "plan_append",
     "rechunk",
@@ -46,7 +45,6 @@ __all__ = [
 
 _LAZY: dict[str, str] = {
     "AppConfig": "annizarr._core._config",
-    "load_config": "annizarr._core._config",
     "Repo": "annizarr.ic",
     "AppendPlan": "annizarr.ops",
     "OpResult": "annizarr.ops",

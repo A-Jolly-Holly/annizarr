@@ -12,7 +12,7 @@ from annizarr.config import AppConfig, ChunkConfig, IOConfig
 from annizarr.ic import Repo
 from annizarr.ops import add_expr, append, convert_h5ad, sort
 
-_CHUNKS = ChunkConfig(x_row_chunk=16, x_col_chunk=4, sparse_flat_chunk=64)
+_CHUNKS = ChunkConfig(row_chunk=16, col_chunk=4, nnz_chunk=64)
 
 
 def _ic_cfg(**io) -> AppConfig:
@@ -30,7 +30,7 @@ def test_icechunk_lifecycle_one_commit_per_op(tmp_path: Path) -> None:
     h5_a = make_h5ad(tmp_path, "a.h5ad", adata=make_adata(n_obs=20, seed=0))
     r_convert = convert_h5ad(str(h5_a), output=str(repo_path), cfg=_ic_cfg())
 
-    r_add_expr = add_expr(str(repo_path), fmt="csr", cfg=_ic_cfg())
+    r_add_expr = add_expr(str(repo_path), layout="csr", cfg=_ic_cfg())
 
     h5_b = make_h5ad(tmp_path, "b.h5ad", adata=make_adata(n_obs=8, seed=1))
     cells_store = tmp_path / "b.zarr"
@@ -66,7 +66,7 @@ def test_icechunk_sort_re_deriving_lone_gexp_layer_is_one_commit(tmp_path: Path)
     repo_path = tmp_path / "repo.icechunk"
     h5 = make_h5ad(tmp_path, adata=make_adata(n_obs=20, seed=0))
     convert_h5ad(str(h5), output=str(repo_path), cfg=_ic_cfg())
-    add_expr(str(repo_path), fmt="csr", cfg=_ic_cfg())
+    add_expr(str(repo_path), layout="csr", cfg=_ic_cfg())
 
     sorted_path = tmp_path / "sorted_gexp.icechunk"
     r_sort = sort(str(repo_path), output=str(sorted_path), by=("cell_type",), cfg=_ic_cfg())
@@ -86,7 +86,7 @@ def test_branch_dev_created_on_existing_repo_leaves_main_unchanged(tmp_path: Pat
     h5 = make_h5ad(tmp_path, adata=make_adata(n_obs=20, seed=0))
     r_convert = convert_h5ad(str(h5), output=str(repo_path), cfg=_ic_cfg())
 
-    r_dev = add_expr(str(repo_path), fmt="csr", cfg=_plain_cfg(), branch="dev")
+    r_dev = add_expr(str(repo_path), layout="csr", cfg=_plain_cfg(), branch="dev")
     assert r_dev.snapshot_id is not None
 
     main_log = Repo(str(repo_path), branch="main").log(branch="main")
@@ -112,7 +112,7 @@ def test_open_input_group_snapshot_id_reads_pre_add_expr_state(tmp_path: Path) -
     repo_path = tmp_path / "repo.icechunk"
     h5 = make_h5ad(tmp_path, adata=make_adata(n_obs=10, seed=0))
     r_convert = convert_h5ad(str(h5), output=str(repo_path), cfg=_ic_cfg())
-    add_expr(str(repo_path), fmt="csr", cfg=_ic_cfg())
+    add_expr(str(repo_path), layout="csr", cfg=_ic_cfg())
 
     old = open_input_group(str(repo_path), snapshot_id=r_convert.snapshot_id)
     assert "gexp" not in (list(old["layers"]) if "layers" in old else [])
@@ -128,5 +128,5 @@ def test_in_place_op_auto_detects_icechunk_without_backend_flag(tmp_path: Path) 
     convert_h5ad(str(h5), output=str(repo_path), cfg=_ic_cfg())
 
     # cfg.io.backend defaults to "zarr" here — the icechunk repo layout is auto-detected
-    result = add_expr(str(repo_path), fmt="csr", cfg=_plain_cfg())
+    result = add_expr(str(repo_path), layout="csr", cfg=_plain_cfg())
     assert result.snapshot_id is not None

@@ -8,22 +8,34 @@ import zarr
 from anndata.io import read_elem
 
 from annizarr._core import _layout
-from annizarr._core._config import load_config
+from annizarr._core._config import AppConfig
 from annizarr._core._runtime import configure_runtime, run_parallel, stage
-from annizarr._core._zarr import as_array, as_group, get_array, get_group, shape_attr, str_attr, str_list_attr
+from annizarr._core._zarr import (
+    as_array,
+    as_group,
+    get_array,
+    get_group,
+    has_element,
+    shape_attr,
+    str_attr,
+    str_list_attr,
+)
 from annizarr._storage import open_input_group, open_store_rw, store_name
 from annizarr.errors import ConversionError
 from annizarr.ops._expr import lognorm_band, target_sum_attr
 from annizarr.ops._result import AppendPlan, OpResult
 
 if TYPE_CHECKING:
-    from annizarr._core._config import AppConfig
+    import pandas as pd
+
     from annizarr.typing import PathLike
 
 logger = logging.getLogger(__name__)
 
 _INDEX_SCAN_ROWS = 1 << 20
 _NULLABLE_ENCODINGS = ("nullable-integer", "nullable-boolean", "nullable-string-array")
+# mutually appendable: the store column keeps its encoding and the incoming values are converted
+_STRINGLIKE_ENCODINGS = ("categorical", "string-array", "nullable-string-array")
 
 
 def plan_append(store: PathLike, *, cells: PathLike) -> AppendPlan:
@@ -60,18 +72,19 @@ def plan_append(store: PathLike, *, cells: PathLike) -> AppendPlan:
         x = get_group(g, "X")
         if x.attrs.get("encoding-type") != "csr_matrix":
             raise ConversionError(f"append requires CSR X in {label}; got {x.attrs.get('encoding-type')!r}.")
-    if "raw" in root and len(list(get_group(root, "raw"))) > 0:
+    if has_element(root, "raw") and len(list(get_group(root, "raw"))) > 0:
         raise ConversionError("append does not extend raw (it is obs-aligned); drop raw first.")
 
     layer_keys = list(get_group(root, "layers")) if "layers" in root else []
     obsp_keys = list(get_group(root, "obsp")) if "obsp" in root else []
     obsm_keys = list(get_group(root, "obsm")) if "obsm" in root else []
 
-    var_t, var_s = read_elem(root["var"]), read_elem(src["var"])
+    var_t: pd.DataFrame = read_elem(root["var"])
+    var_s: pd.DataFrame = read_elem(src["var"])
     if len(var_t) != len(var_s) or not (var_t.index == var_s.index).all():
         raise ConversionError("var mismatch: names + order must be identical between stores.")
 
-    _check_obs_schema(get_group(root, "obs"), get_group(src, "obs"))
+    obs_notes = _check_obs_schema(get_group(root, "obs"), get_group(src, "obs"))
 
     x_t, x_s = get_group(root, "X"), get_group(src, "X")
     data_t, data_s = get_array(x_t, "data"), get_array(x_s, "data")
@@ -88,13 +101,13 @@ def plan_append(store: PathLike, *, cells: PathLike) -> AppendPlan:
         ext_layers, bad_layers = _extendable_layers(get_group(root, "layers"), layer_keys, indptr_t)
     drop_layers = [k for k in layer_keys if k not in ext_layers]
 
-    notes: list[str] = []
+    notes: list[str] = list(obs_notes)
     if bad_layers:
         notes.append(f"layers {bad_layers}: sparsity differs from X, cannot extend.")
     extras = []
     if "layers" in src and list(get_group(src, "layers")):
         extras.append(f"layers {list(get_group(src, 'layers'))}")
-    if "raw" in src and len(list(get_group(src, "raw"))) > 0:
+    if has_element(src, "raw") and len(list(get_group(src, "raw"))) > 0:
         extras.append("raw")
     if "obsm" in src and list(get_group(src, "obsm")):
         extras.append(f"obsm {list(get_group(src, 'obsm'))}")
@@ -149,7 +162,7 @@ def append(
     extend_layers
         Extend eligible add-expr CSR layers in place instead of dropping them.
     cfg
-        Resolved configuration; ``None`` loads :func:`~annizarr.config.load_config` defaults.
+        Resolved configuration; ``None`` uses the :class:`~annizarr.config.AppConfig` defaults.
     branch
         Icechunk branch to edit; created off the current tip if it doesn't exist yet.
         Ignored for plain zarr.
@@ -168,7 +181,7 @@ def append(
         :func:`plan_append`), or the mutation fails partway through.
     """
     if cfg is None:
-        cfg = load_config()
+        cfg = AppConfig()
 
     plan = plan_append(store, cells=cells)
     drop_layers = list(plan.drop_layers)
@@ -233,7 +246,7 @@ def append(
     return OpResult(path=str(store), n_obs=n_t + n_s, n_vars=n_vars, snapshot_id=snapshot_id)
 
 
-def _check_obs_schema(obs_t: zarr.Group, obs_s: zarr.Group) -> None:
+def _check_obs_schema(obs_t: zarr.Group, obs_s: zarr.Group) -> list[str]:
     cols_t = str_list_attr(obs_t, "column-order")
     cols_s = str_list_attr(obs_s, "column-order")
     if cols_t != cols_s:
@@ -243,30 +256,42 @@ def _check_obs_schema(obs_t: zarr.Group, obs_s: zarr.Group) -> None:
         if stray:
             raise ConversionError(f"obs in {label} has elements outside column-order: {stray}.")
 
+    notes: list[str] = []
     pairs = [(c, obs_t[c], obs_s[c]) for c in cols_t]
     pairs.append(("<index>", obs_t[str_attr(obs_t, "_index")], obs_s[str_attr(obs_s, "_index")]))
     for name, t, s in pairs:
-        enc = t.attrs.get("encoding-type")
-        if enc != s.attrs.get("encoding-type"):
+        enc, enc_s = t.attrs.get("encoding-type"), s.attrs.get("encoding-type")
+        stringlike = enc in _STRINGLIKE_ENCODINGS and enc_s in _STRINGLIKE_ENCODINGS
+        if enc != enc_s and not stringlike:
             raise ConversionError(
-                f"obs column '{name}' encoding mismatch ({enc!r} vs {s.attrs.get('encoding-type')!r}); "
-                "reconcile before append."
+                f"obs column '{name}' encoding mismatch ({enc!r} vs {enc_s!r}); reconcile before append."
             )
         if enc == "categorical":
-            t_grp, s_grp = as_group(t), as_group(s)
-            cat_t = np.asarray(get_array(t_grp, "categories")[:])
-            cat_s = np.asarray(get_array(s_grp, "categories")[:])
-            # codes are positional: mismatched categories/order would silently remap labels
-            if (
-                bool(t_grp.attrs.get("ordered", False)) != bool(s_grp.attrs.get("ordered", False))
-                or len(cat_t) != len(cat_s)
-                or not (cat_t == cat_s).all()
-            ):
+            t_grp = as_group(t)
+            cat_t = np.asarray(get_array(t_grp, "categories")[:]).tolist()
+            if bool(t_grp.attrs.get("ordered", False)):
+                # ordered categories carry meaning in their order, so they must match exactly
+                s_grp = as_group(s) if enc_s == "categorical" else None
+                cat_s = np.asarray(get_array(s_grp, "categories")[:]).tolist() if s_grp is not None else None
+                if s_grp is None or not bool(s_grp.attrs.get("ordered", False)) or cat_t != cat_s:
+                    raise ConversionError(
+                        f"obs column '{name}' categorical dtype mismatch "
+                        "(an ordered categorical's categories, order, and ordered flag must be identical); "
+                        "reconcile before append."
+                    )
+            else:
+                new = _new_categories(cat_t, _stringlike_labels(s))
+                if new:
+                    _check_category_room(t_grp, len(cat_t) + len(new), new, name)
+                    shown = ", ".join(map(str, new[:5])) + (", …" if len(new) > 5 else "")
+                    plural = "y" if len(new) == 1 else "ies"
+                    notes.append(f"obs column '{name}': {len(new)} new categor{plural} appended ({shown}).")
+        elif enc == "string-array" and enc_s != "string-array":
+            if any(label is None for label in _stringlike_labels(s)):
                 raise ConversionError(
-                    f"obs column '{name}' categorical dtype mismatch "
-                    "(categories, order, and the ordered flag must be identical); reconcile before append."
+                    f"obs column '{name}': cells hold missing values; the store's plain string column cannot."
                 )
-        elif enc in _NULLABLE_ENCODINGS:
+        elif enc in _NULLABLE_ENCODINGS and enc_s == enc:
             t_grp, s_grp = as_group(t), as_group(s)
             t_values, s_values = get_array(t_grp, "values"), get_array(s_grp, "values")
             if t_values.dtype != s_values.dtype:
@@ -278,13 +303,54 @@ def _check_obs_schema(obs_t: zarr.Group, obs_s: zarr.Group) -> None:
                     f"obs column '{name}' dtype mismatch ({t_arr.dtype} vs {s_arr.dtype}); "
                     "obs columns extend in place, so dtypes must match exactly."
                 )
-        elif enc != "string-array":
+        elif not stringlike:
             raise ConversionError(f"obs column '{name}': unsupported encoding {enc!r} for in-place append.")
+    return notes
+
+
+def _stringlike_labels(node: Any) -> np.ndarray[Any, Any]:
+    # a string-like obs column as an object array of labels, None where the value is missing
+    enc = node.attrs.get("encoding-type")
+    if enc == "categorical":
+        g = as_group(node)
+        cats = np.array([*np.asarray(get_array(g, "categories")[:]).tolist(), None], dtype=object)
+        return np.asarray(cats[np.asarray(get_array(g, "codes")[:])], dtype=object)  # -1 -> trailing None
+    if enc == "nullable-string-array":
+        g = as_group(node)
+        values = np.asarray(np.asarray(get_array(g, "values")[:]).tolist(), dtype=object)
+        values[np.asarray(get_array(g, "mask")[:], dtype=bool)] = None
+        return values
+    return np.asarray(np.asarray(as_array(node)[:]).tolist(), dtype=object)
+
+
+def _new_categories(categories: list[Any], labels: np.ndarray[Any, Any]) -> list[Any]:
+    import pandas as pd
+
+    known = set(categories)
+    return [label for label in pd.unique(labels) if label is not None and label not in known]
+
+
+def _check_category_room(t_grp: zarr.Group, n_categories: int, new: list[Any], name: str) -> None:
+    cats_arr, codes_arr = get_array(t_grp, "categories"), get_array(t_grp, "codes")
+    if cats_arr.dtype.kind in "iufb":
+        raise ConversionError(f"obs column '{name}': categories are {cats_arr.dtype}, cannot add {new[:5]}.")
+    if n_categories - 1 > np.iinfo(codes_arr.dtype).max:
+        raise ConversionError(
+            f"obs column '{name}': {n_categories} categories exceed its {codes_arr.dtype} code width; "
+            "rewrite the store with wider codes before appending."
+        )
+
+
+def _index_values(obs: zarr.Group) -> zarr.Array[Any]:
+    # the 1-D array of obs names: the index element itself (string-array), or its values array
+    # when anndata wrote a pandas>=3 string index as a nullable-string-array group
+    node = obs[str_attr(obs, "_index")]
+    return node if isinstance(node, zarr.Array) else get_array(as_group(node), "values")
 
 
 def _count_duplicate_names(obs_t: zarr.Group, obs_s: zarr.Group, n_t: int) -> int:
     # counted once per row, not once per colliding pair
-    idx_s = np.asarray(get_array(obs_s, str_attr(obs_s, "_index"))[:])
+    idx_s = np.asarray(_index_values(obs_s)[:])
 
     order = np.argsort(idx_s, kind="stable")
     repeats_earlier = np.zeros(len(idx_s), dtype=bool)
@@ -295,7 +361,7 @@ def _count_duplicate_names(obs_t: zarr.Group, obs_s: zarr.Group, n_t: int) -> in
         is_repeat_sorted[1:] = sorted_idx[1:] == sorted_idx[:-1]
         repeats_earlier[order] = is_repeat_sorted
 
-    t_arr = get_array(obs_t, str_attr(obs_t, "_index"))
+    t_arr = _index_values(obs_t)
     chunk0 = t_arr.chunks[0]
     step = max(chunk0, (_INDEX_SCAN_ROWS // max(1, chunk0)) * chunk0)
     in_target = np.zeros(len(idx_s), dtype=bool)
@@ -399,18 +465,43 @@ def _append_obs(obs_t: Any, obs_s: Any, n_t: int, n_new: int) -> None:
     pairs.append((obs_t.attrs["_index"], obs_s.attrs["_index"]))
     for name_t, name_s in pairs:
         t, s = obs_t[name_t], obs_s[name_s]
-        if isinstance(t, zarr.Array):
-            _extend_1d(t, s, n_t, n_new)
-        elif t.attrs.get("encoding-type") == "categorical":
-            _extend_1d(t["codes"], s["codes"], n_t, n_new)  # categories validated identical
+        enc, enc_s = t.attrs.get("encoding-type"), s.attrs.get("encoding-type")
+        if enc == "categorical":
+            _extend_categorical(t, _stringlike_labels(s), n_t, n_new, name_t)
+        elif isinstance(t, zarr.Array):
+            if isinstance(s, zarr.Array):
+                _extend_1d(t, s[:], n_t, n_new)
+            else:  # string-array target fed from a categorical / nullable column (no missing values: checked in plan)
+                _extend_1d(t, np.asarray(_stringlike_labels(s), dtype=str), n_t, n_new)
+        elif enc == "nullable-string-array" and enc_s != enc:
+            labels = _stringlike_labels(s)
+            missing = np.fromiter((label is None for label in labels), dtype=bool, count=len(labels))
+            _extend_1d(t["values"], np.asarray(np.where(missing, "", labels), dtype=str), n_t, n_new)
+            _extend_1d(t["mask"], missing, n_t, n_new)
         else:  # nullable-*: values + mask
-            _extend_1d(t["values"], s["values"], n_t, n_new)
-            _extend_1d(t["mask"], s["mask"], n_t, n_new)
+            _extend_1d(t["values"], s["values"][:], n_t, n_new)
+            _extend_1d(t["mask"], s["mask"][:], n_t, n_new)
 
 
-def _extend_1d(dst: Any, src: Any, n_t: int, n_new: int) -> None:
-    vals = src[:]
-    if src.dtype != dst.dtype:  # e.g. categorical codes stored at different widths
+def _extend_categorical(t: Any, labels: np.ndarray[Any, Any], n_t: int, n_new: int, name: str) -> None:
+    # the store's categories stay as they are; unseen labels are appended as new categories and
+    # the incoming values re-coded against the result, so codes already on disk never move
+    import pandas as pd
+
+    cats_arr, codes_arr = t["categories"], t["codes"]
+    cats = np.asarray(cats_arr[:]).tolist()
+    new = _new_categories(cats, labels)
+    if new:
+        _check_category_room(t, len(cats) + len(new), new, name)
+        cats_arr.resize((len(cats) + len(new),))
+        cats_arr[len(cats) :] = np.asarray(new, dtype=str)
+    codes = pd.Categorical(labels, categories=[*cats, *new]).codes  # -1 where the label is None
+    _extend_1d(codes_arr, codes, n_t, n_new)
+
+
+def _extend_1d(dst: Any, vals: Any, n_t: int, n_new: int) -> None:
+    vals = np.asarray(vals)
+    if vals.dtype != dst.dtype and dst.dtype.kind in "iufb":  # e.g. categorical codes stored at different widths
         vals = vals.astype(dst.dtype)
     dst.resize((n_new,))
     dst[n_t:n_new] = vals

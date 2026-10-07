@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import pytest
 import scipy.sparse as sp
 
@@ -16,7 +17,7 @@ _EXPECTED_DENSE = np.array([[1.0, 0.0, 3.0], [0.0, 2.0, 0.0]], dtype=np.float32)
 
 
 def _cfg() -> AppConfig:
-    return AppConfig(io=IOConfig(), chunks=ChunkConfig(x_row_chunk=4, x_col_chunk=4, sparse_flat_chunk=64))
+    return AppConfig(io=IOConfig(), chunks=ChunkConfig(row_chunk=4, col_chunk=4, nnz_chunk=64))
 
 
 def test_v3_reads_expected_x_obs_var_gex_filter_and_dtype_widen(tmp_path: Path) -> None:
@@ -32,7 +33,7 @@ def test_v3_reads_expected_x_obs_var_gex_filter_and_dtype_widen(tmp_path: Path) 
     assert list(adata.var["gene_ids"]) == ["ENSG001", "ENSG002", "ENSG003"]
     assert list(adata.var["feature_types"]) == ["Gene Expression"] * 3
     assert list(adata.var["genome"]) == ["GRCh38"] * 3
-    assert all(adata.var[c].dtype == object for c in adata.var.columns)
+    assert all(pd.api.types.is_string_dtype(adata.var[c]) for c in adata.var.columns)  # object or pandas 3 str
 
     # a non-Gene-Expression feature row is dropped by the GEX-only filter
     p_mixed = make_10x_v3_h5(tmp_path / "v3_mixed.h5", include_non_gex=True)

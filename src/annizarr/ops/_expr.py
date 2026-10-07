@@ -3,14 +3,13 @@ from __future__ import annotations
 import logging
 import shutil
 import tempfile
-from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
 from annizarr._core import _layout
-from annizarr._core._config import load_config
+from annizarr._core._config import AppConfig
 from annizarr._core._layout import x_compressors
 from annizarr._core._runtime import configure_runtime, stage
 from annizarr._core._zarr import get_array, get_group, shape_attr
@@ -25,8 +24,7 @@ if TYPE_CHECKING:
     import zarr
     from numpy.typing import NDArray
 
-    from annizarr._core._config import AppConfig
-    from annizarr.typing import PathLike, XStorage
+    from annizarr.typing import Layout, PathLike
 
 logger = logging.getLogger(__name__)
 
@@ -42,9 +40,8 @@ def target_sum_attr(attrs: Any) -> float | None:
 def add_expr(
     store: PathLike,
     *,
-    fmt: XStorage = "csc",
+    layout: Layout = "csc",
     layer: str = "gexp",
-    chunk_elems: int = 1_000_000,
     target_sum: float = 1e4,
     overwrite: bool = False,
     cfg: AppConfig | None = None,
@@ -57,23 +54,22 @@ def add_expr(
     ----------
     store
         Existing AnnData zarr (or Icechunk) store to update, in place.
-    fmt
-        Storage format for the new layer.
+    layout
+        On-disk layout of the new layer: ``"csr"``, ``"csc"``, or ``"dense"``. Chunking
+        follows ``cfg.chunks``: ``col_chunk`` (csc), ``row_chunk`` (csr/dense), else ``nnz_chunk``.
     layer
         Layer name.
-    chunk_elems
-        Chunk size (elements) for the layer.
     target_sum
         Library-size normalization target (per-row sum after normalization).
     overwrite
         Replace an existing ``layers/<layer>`` instead of erroring.
     cfg
-        Resolved configuration; ``None`` loads :func:`~annizarr.config.load_config` defaults.
+        Resolved configuration; ``None`` uses the :class:`~annizarr.config.AppConfig` defaults.
     branch
         Icechunk branch to edit; created off the current tip if it doesn't exist yet.
         Ignored for plain zarr.
     message
-        Icechunk commit message; ``None`` names the op, ``fmt``, and the layer.
+        Icechunk commit message; ``None`` names the op, ``layout``, and the layer.
 
     Returns
     -------
@@ -83,16 +79,14 @@ def add_expr(
     ------
     ConversionError
         ``store`` has no CSR X, ``layers/<layer>`` already exists and ``overwrite`` is
-        not set, or ``fmt`` is not one of ``"csr"``, ``"csc"``, ``"dense"``.
+        not set, or ``layout`` is not one of ``"csr"``, ``"csc"``, ``"dense"``.
     """
     if cfg is None:
-        cfg = load_config()
+        cfg = AppConfig()
     configure_runtime(cfg.chunks.cpus)
-    commit_message = message or f"annizarr add-expr {fmt} → layers/{layer}"
+    commit_message = message or f"annizarr add-expr {layout} → layers/{layer}"
     root, finalize = open_store_rw(store, cfg, commit_message=commit_message, branch=branch)
-    write_expr_layer(
-        root, cfg, fmt=fmt, layer=layer, chunk_elems=chunk_elems, target_sum=target_sum, overwrite=overwrite
-    )
+    write_expr_layer(root, cfg, layout=layout, layer=layer, target_sum=target_sum, overwrite=overwrite)
     n_obs, n_vars = shape_attr(get_group(root, "X"))
     snapshot_id = finalize()
     return OpResult(path=str(store), n_obs=n_obs, n_vars=n_vars, snapshot_id=snapshot_id)
@@ -102,16 +96,15 @@ def write_expr_layer(
     root: zarr.Group,
     cfg: AppConfig,
     *,
-    fmt: XStorage = "csc",
+    layout: Layout = "csc",
     layer: str = "gexp",
-    chunk_elems: int = 1_000_000,
     target_sum: float = 1e4,
     overwrite: bool = False,
 ) -> None:
     # does not finalize the store — the caller owns that, so sort() can re-derive a lone
     # gexp layer in the same commit as the sort itself.
-    if fmt not in ("csc", "dense", "csr"):
-        raise ConversionError(f"add-expr format must be csc, dense, or csr; got '{fmt}'.")
+    if layout not in ("csc", "dense", "csr"):
+        raise ConversionError(f"add-expr layout must be csc, dense, or csr; got '{layout}'.")
     if "X" not in root:
         raise ConversionError("no X in store — not an AnnData zarr store?")
     x = get_group(root, "X")
@@ -142,7 +135,7 @@ def write_expr_layer(
 
     indptr_dtype = np.int64 if nnz > np.iinfo(np.int32).max else np.int32
 
-    if fmt == "csr":
+    if layout == "csr":
         g = _sparse_layer(
             layers,
             layer,
@@ -151,7 +144,7 @@ def write_expr_layer(
             nnz,
             idx_arr.dtype,
             indptr_dtype,
-            chunk_elems,
+            _layout.sparse_flat_chunk(cfg.chunks, csr=True, nnz=nnz, n_major=n_obs),
             target_sum,
             cfg.chunks.auto_shard,
         )
@@ -166,27 +159,27 @@ def write_expr_layer(
                 g["indices"][s0:s1] = idx_arr[s0:s1]
         return
 
-    if fmt == "csc":
+    if layout == "csc":
         factors = _lognorm_factors(data_arr, indptr, target_sum, row_step, n_obs)
-        layer_cfg = replace(cfg, chunks=replace(cfg.chunks, sparse_flat_chunk=chunk_elems))
-        x_reader = as_reader(x, cfg=layer_cfg, tmp_dir=_local_tmp_dir(layers))
+        x_reader = as_reader(x, cfg=cfg, tmp_dir=_local_tmp_dir(layers))
         try:
             with stage(f"Writing layers/{layer} (csc, nnz={nnz})"):
-                g = write_transposed_sparse(layers, layer, x_reader, layer_cfg, row_scale=factors, target="csc")
+                g = write_transposed_sparse(layers, layer, x_reader, cfg, row_scale=factors, target="csc")
         finally:
             x_reader.close()
         g.attrs[_TARGET_SUM_ATTR] = float(target_sum)
         return
 
     col_nnz = np.zeros(n_vars, dtype=np.int64)
-    flat_step = max(chunk_elems, _layout.BATCH_BYTES // 8)
+    flat_step = max(cfg.chunks.nnz_chunk, _layout.BATCH_BYTES // 8)
     with stage("Counting nnz per gene"):
         for s0 in range(0, nnz, flat_step):
             s1 = min(s0 + flat_step, nnz)
             col_nnz += np.bincount(np.asarray(idx_arr[s0:s1]), minlength=n_vars)
     csc_indptr = np.concatenate([[0], np.cumsum(col_nnz)]).astype(np.int64)
 
-    k = max(1, chunk_elems // n_obs)
+    # dense layer: full-height column bands; col_chunk sets the band width, else ~nnz_chunk cells per chunk
+    k = cfg.chunks.col_chunk or max(1, cfg.chunks.nnz_chunk // n_obs)
     band_cols = max(k, (_layout.BATCH_BYTES // (4 * n_obs)) // k * k)
     edges = [*range(0, n_vars, band_cols), n_vars]
     n_bands = len(edges) - 1
@@ -231,7 +224,7 @@ def write_expr_layer(
             layer,
             shape=(n_obs, n_vars),
             dtype=np.float32,
-            chunks=(n_obs, k),
+            chunks=(min(cfg.chunks.row_chunk or n_obs, n_obs), k),
             compressors=x_compressors(),
             overwrite=True,
         )
@@ -283,18 +276,18 @@ def _lognorm_factors(
     return factors
 
 
-def introspect_gexp(node: Any) -> tuple[XStorage, int, float | None]:
+def introspect_gexp(node: Any) -> tuple[Layout, int, float | None]:
     import zarr
 
     target_sum = target_sum_attr(node.attrs)
     if isinstance(node, zarr.Array):
         return "dense", node.chunks[0] * node.chunks[1], target_sum
     enc = node.attrs.get("encoding-type")
-    fmt_map: dict[str, XStorage] = {"csr_matrix": "csr", "csc_matrix": "csc"}
-    fmt = fmt_map.get(enc)
-    if fmt is None:
+    layout_map: dict[str, Layout] = {"csr_matrix": "csr", "csc_matrix": "csc"}
+    layout = layout_map.get(enc)
+    if layout is None:
         raise ConversionError(f"cannot re-derive layers/gexp: unsupported encoding {enc!r}.")
-    return fmt, int(node["data"].chunks[0]), target_sum
+    return layout, int(node["data"].chunks[0]), target_sum
 
 
 def _sparse_layer(
@@ -305,14 +298,14 @@ def _sparse_layer(
     nnz: int,
     indices_dtype: Any,
     indptr_dtype: Any,
-    chunk_elems: int,
+    flat_chunk: int,
     target_sum: float,
     auto_shard: bool,
 ) -> Any:
     g = make_sparse_group(layers, name, csr=(enc == "csr_matrix"), shape=shape)
     g.attrs[_TARGET_SUM_ATTR] = float(target_sum)
     n_major = shape[0] if enc == "csr_matrix" else shape[1]
-    flat = min(chunk_elems, max(1, nnz))
+    flat = flat_chunk
     shards = sparse_shards(auto_shard)
     with suppress_autoshard_warning(auto_shard):
         g.require_array(

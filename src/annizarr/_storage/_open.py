@@ -37,15 +37,17 @@ def check_output_target(output_path: PathLike, cfg: AppConfig) -> None:
 
         if Repo.exists(str(output_path)) and not cfg.io.overwrite:
             raise StorageError(
-                f"Icechunk repo already exists at '{output_path}'. Use overwrite=true in "
-                "config or --overwrite to replace its contents."
+                f"Icechunk repo already exists at '{output_path}'. Pass --overwrite "
+                "(or IOConfig(overwrite=True)) to replace its contents."
             )
         return
     if is_remote(output_path):
         return  # rejected later by open_output_store (remote requires the icechunk backend)
     target = Path(output_path)
     if target.exists() and not cfg.io.overwrite:
-        raise StorageError(f"Output path already exists: {target}. Use overwrite=true in config or --overwrite flag.")
+        raise StorageError(
+            f"Output path already exists: {target}. Pass --overwrite (or IOConfig(overwrite=True)) to replace it."
+        )
 
 
 @dataclass
@@ -96,7 +98,7 @@ def open_output_store(
     if is_remote(output_path):
         raise StorageError(
             f"Remote output '{output_path}' requires the icechunk backend — pass --ic "
-            "(or set io.backend='icechunk' in config)."
+            "(or IOConfig(backend='icechunk'))."
         )
 
     # atomic swap: same-filesystem temp dir (plain rename); old store moved aside, not

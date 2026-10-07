@@ -13,14 +13,19 @@ import zarr
 from _readable import assert_anndata_readable
 from annizarr.config import AppConfig, ChunkConfig, IOConfig
 from annizarr.errors import ConversionError, StorageError
-from annizarr.ops import add_expr, append, convert_h5ad, rechunk, sort
+from annizarr.ops import add_expr, append, convert_h5ad, plan_append, rechunk, sort
 
 
 def _cfg(**io):
     return AppConfig(
         io=IOConfig(**io),
-        chunks=ChunkConfig(x_row_chunk=16, x_col_chunk=4, sparse_flat_chunk=64),
+        chunks=ChunkConfig(row_chunk=16, col_chunk=4, nnz_chunk=64),
     )
+
+
+def _layer_cfg(nnz_chunk, **io):
+    # add-expr layers: pin the flat chunk directly, with no axis chunk set
+    return AppConfig(io=IOConfig(**io), chunks=ChunkConfig(nnz_chunk=nnz_chunk))
 
 
 def _adata(n=40, v=6, seed=0):
@@ -60,42 +65,42 @@ def _messages(caplog):
 # ── add-expr ─────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("fmt", ["csr", "csc", "dense"])
-def test_add_expr_all_formats(tmp_path, fmt):
+@pytest.mark.parametrize("layout", ["csr", "csc", "dense"])
+def test_add_expr_all_formats(tmp_path, layout):
     adata = _adata()
     out = _store(tmp_path, adata)
-    add_expr(str(out), fmt=fmt, chunk_elems=80, cfg=_cfg())
+    add_expr(str(out), layout=layout, cfg=_layer_cfg(80))
     assert_anndata_readable(out)
     got = ad.read_zarr(str(out))
-    if fmt == "dense":
+    if layout == "dense":
         g = zarr.open_group(str(out), mode="r")["layers/gexp"]
         assert g.chunks == (adata.n_obs, 2)
         vals = np.asarray(got.layers["gexp"])
     else:
-        enc = {"csr": "csr_matrix", "csc": "csc_matrix"}[fmt]
+        enc = {"csr": "csr_matrix", "csc": "csc_matrix"}[layout]
         g = zarr.open_group(str(out), mode="r")
         assert g["layers/gexp"].attrs["encoding-type"] == enc
         vals = got.layers["gexp"].toarray()
     np.testing.assert_allclose(vals, _expected_gexp(adata.X), rtol=1e-5)
     np.testing.assert_allclose(got.X.toarray(), adata.X.toarray())
 
-    if fmt == "csc":
+    if layout == "csc":
         # csc's per-row factors are computed up front in the same row_step bands the csr
         # path's fused per-band transform uses (_ops/_expr.py's "bit-identical factors"
         # comment) — verify that claim directly against a csr layer on the same store,
         # not just both against the separately-computed _expected_gexp reference above.
         # toarray() already places values at their canonical column position per row, so
         # sorting is a no-op safety net here, not load-bearing.
-        add_expr(str(out), fmt="csr", layer="gexp_csr_ref", chunk_elems=80, cfg=_cfg())
+        add_expr(str(out), layout="csr", layer="gexp_csr_ref", cfg=_layer_cfg(80))
         csr_vals = ad.read_zarr(str(out)).layers["gexp_csr_ref"].toarray()
         assert np.array_equal(np.sort(vals, axis=1), np.sort(csr_vals, axis=1))
 
-    if fmt == "dense":
+    if layout == "dense":
         # overwrite guard (was a standalone test): re-adding without overwrite=True
         # raises; overwrite=True actually replaces the layer's format.
         with pytest.raises(ConversionError, match="already exists"):
-            add_expr(str(out), fmt="dense", cfg=_cfg())
-        add_expr(str(out), fmt="csc", overwrite=True, cfg=_cfg())
+            add_expr(str(out), layout="dense", cfg=_cfg())
+        add_expr(str(out), layout="csc", overwrite=True, cfg=_cfg())
         assert not isinstance(zarr.open_group(str(out), mode="r")["layers/gexp"], zarr.Array)
 
 
@@ -109,12 +114,12 @@ def test_add_expr_empty_rows_and_genes(tmp_path):
         obs=pd.DataFrame({"cell_type": pd.Categorical(["a"] * 10)}, index=[f"c{i}" for i in range(10)]),
         var=pd.DataFrame(index=[f"g{i}" for i in range(5)]),
     )
-    for fmt in ("csr", "csc", "dense"):
-        out = _store(tmp_path, adata, f"empty-{fmt}.zarr")
-        add_expr(str(out), fmt=fmt, chunk_elems=16, cfg=_cfg())
+    for layout in ("csr", "csc", "dense"):
+        out = _store(tmp_path, adata, f"empty-{layout}.zarr")
+        add_expr(str(out), layout=layout, cfg=_layer_cfg(16))
         got = ad.read_zarr(str(out))
         vals = got.layers["gexp"]
-        vals = np.asarray(vals) if fmt == "dense" else vals.toarray()
+        vals = np.asarray(vals) if layout == "dense" else vals.toarray()
         np.testing.assert_allclose(vals, _expected_gexp(adata.X), rtol=1e-5)
         assert not vals[0].any() and not vals[-1].any() and not vals[:, 2].any()
 
@@ -124,12 +129,12 @@ def test_add_expr_multiband(tmp_path, monkeypatch):
     # bucket cursors and band-edge math the default 256 MB budget never hits in tests
     monkeypatch.setattr("annizarr._core._layout.BATCH_BYTES", 600)
     adata = _adata(n=1200, v=12, seed=4)
-    for fmt in ("csc", "dense"):
-        out = _store(tmp_path, adata, f"mb-{fmt}.zarr")
-        add_expr(str(out), fmt=fmt, chunk_elems=80, cfg=_cfg())
+    for layout in ("csc", "dense"):
+        out = _store(tmp_path, adata, f"mb-{layout}.zarr")
+        add_expr(str(out), layout=layout, cfg=_layer_cfg(80))
         got = ad.read_zarr(str(out))
         vals = got.layers["gexp"]
-        vals = np.asarray(vals) if fmt == "dense" else vals.toarray()
+        vals = np.asarray(vals) if layout == "dense" else vals.toarray()
         np.testing.assert_allclose(vals, _expected_gexp(adata.X), rtol=1e-5)
 
 
@@ -139,9 +144,9 @@ def test_add_expr_multiband(tmp_path, monkeypatch):
 def test_rechunk_sparse_and_dense(tmp_path):
     adata = _adata()
     out = _store(tmp_path, adata)
-    add_expr(str(out), fmt="csc", chunk_elems=32, cfg=_cfg())
+    add_expr(str(out), layout="csc", cfg=_layer_cfg(32))
     out_sparse = tmp_path / "rechunked_sparse.zarr"
-    rechunk(str(out), output=str(out_sparse), cfg=AppConfig(chunks=ChunkConfig(sparse_flat_chunk=16)))
+    rechunk(str(out), output=str(out_sparse), cfg=AppConfig(chunks=ChunkConfig(nnz_chunk=16)))
     assert_anndata_readable(out_sparse)
     g = zarr.open_group(str(out_sparse), mode="r")
     assert g["X/data"].chunks == (16,)  # rechunk target
@@ -153,12 +158,12 @@ def test_rechunk_sparse_and_dense(tmp_path):
     np.testing.assert_allclose(got.obsm["X_umap"], adata.obsm["X_umap"])
     np.testing.assert_allclose(got.layers["gexp"].toarray(), _expected_gexp(adata.X), rtol=1e-5)
 
-    out_dense_src = _store(tmp_path, adata, "dense_src.zarr", cfg=_cfg(x_storage="dense"))
+    out_dense_src = _store(tmp_path, adata, "dense_src.zarr", cfg=_cfg(layout="dense"))
     out_dense = tmp_path / "rechunked_dense.zarr"
     rechunk(
         str(out_dense_src),
         output=str(out_dense),
-        cfg=AppConfig(chunks=ChunkConfig(x_row_chunk=8, x_col_chunk=3, cpus=2)),
+        cfg=AppConfig(chunks=ChunkConfig(row_chunk=8, col_chunk=3, cpus=2)),
     )
     g_dense = zarr.open_group(str(out_dense), mode="r")
     assert g_dense["X"].chunks == (8, 3)
@@ -168,13 +173,13 @@ def test_rechunk_sparse_and_dense(tmp_path):
 
 def test_rechunk_dense_shard_factor(tmp_path):
     adata = _adata(n=64, v=8)
-    out = _store(tmp_path, adata, cfg=_cfg(x_storage="dense"))
+    out = _store(tmp_path, adata, cfg=_cfg(layout="dense"))
     for shard_factor in (1, 2):
         out2 = tmp_path / f"rechunked_sf{shard_factor}.zarr"
         rechunk(
             str(out),
             output=str(out2),
-            cfg=AppConfig(chunks=ChunkConfig(x_row_chunk=8, x_col_chunk=4, x_shard_factor=shard_factor)),
+            cfg=AppConfig(chunks=ChunkConfig(row_chunk=8, col_chunk=4, shard_factor=shard_factor)),
         )
         g = zarr.open_group(str(out2), mode="r")
         assert g["X"].chunks == (8, 4)
@@ -260,9 +265,9 @@ def test_append_validation_guards(tmp_path):
     got = ad.read_zarr(str(sa))
     assert got.n_obs == 20 and "conn" in got.obsp
 
-    # categorical dtype/order mismatch
+    # an ordered categorical in the store must be matched exactly (unordered ones grow instead)
     a2, b2 = _adata(n=20, seed=2), _adata(n=10, seed=3)
-    b2.obs["cell_type"] = pd.Categorical(b2.obs["cell_type"], categories=["a", "b", "c"], ordered=True)
+    a2.obs["cell_type"] = pd.Categorical(a2.obs["cell_type"], categories=["a", "b", "c"], ordered=True)
     sa2 = _store(tmp_path, a2, "a2.zarr")
     sb2 = _store(tmp_path, b2, "b2.zarr")
     with pytest.raises(ConversionError, match="categorical dtype mismatch"):
@@ -314,7 +319,7 @@ def test_append_drop_derived(tmp_path, caplog):
     a, b = _adata(n=30, seed=0), _adata(n=12, seed=1)
     sa = _store(tmp_path, a, "a.zarr")
     sb = _store(tmp_path, b, "b.zarr")
-    add_expr(str(sa), fmt="csc", chunk_elems=32, cfg=_cfg())
+    add_expr(str(sa), layout="csc", cfg=_layer_cfg(32))
     # append never touches derived elements itself: obsm/obsp/layers must be explicitly
     # dropped; layers are then re-derived with add-expr
     with pytest.raises(ConversionError, match="layers"):
@@ -322,8 +327,8 @@ def test_append_drop_derived(tmp_path, caplog):
     append(str(sa), cells=str(sb), drop_derived=True, cfg=_cfg())
     assert any("add-expr" in m for m in _messages(caplog))
     got = ad.read_zarr(str(sa))
-    assert got.n_obs == 42 and len(got.layers) == 0 and len(got.obsm) == 0
-    add_expr(str(sa), fmt="csc", chunk_elems=32, target_sum=1e6, cfg=_cfg())
+    assert got.n_obs == 42 and "gexp" not in got.layers and len(got.obsm) == 0
+    add_expr(str(sa), layout="csc", target_sum=1e6, cfg=_layer_cfg(32))
     got = ad.read_zarr(str(sa))
     np.testing.assert_allclose(
         got.layers["gexp"].toarray(),
@@ -336,7 +341,7 @@ def test_append_extend_layers(tmp_path, caplog):
     a, b = _adata(n=30, seed=0), _adata(n=12, seed=1)
     sa = _store(tmp_path, a, "a.zarr")
     sb = _store(tmp_path, b, "b.zarr")
-    add_expr(str(sa), fmt="csr", chunk_elems=32, target_sum=1e6, cfg=_cfg())
+    add_expr(str(sa), layout="csr", target_sum=1e6, cfg=_layer_cfg(32))
     append(str(sa), cells=str(sb), drop_derived=True, extend_layers=True, cfg=_cfg())
     assert any("extended layers ['gexp']" in m for m in _messages(caplog))
     g = zarr.open_group(str(sa), mode="r")["layers/gexp"]
@@ -355,7 +360,7 @@ def test_append_extend_layers_guards(tmp_path, caplog):
     a, b = _adata(n=30, seed=0), _adata(n=12, seed=1)
     sa = _store(tmp_path, a, "a.zarr")
     sb = _store(tmp_path, b, "b.zarr")
-    add_expr(str(sa), fmt="csc", chunk_elems=32, cfg=_cfg())
+    add_expr(str(sa), layout="csc", cfg=_layer_cfg(32))
     append(str(sa), cells=str(sb), drop_derived=True, extend_layers=True, cfg=_cfg())
     assert any("dropped" in m and "gexp" in m for m in _messages(caplog))
     assert "gexp" not in ad.read_zarr(str(sa)).layers
@@ -364,7 +369,7 @@ def test_append_extend_layers_guards(tmp_path, caplog):
     a2, b2 = _adata(n=30, seed=2), _adata(n=12, seed=3)
     sa2 = _store(tmp_path, a2, "a2.zarr")
     sb2 = _store(tmp_path, b2, "b2.zarr")
-    add_expr(str(sa2), fmt="csr", chunk_elems=32, cfg=_cfg())
+    add_expr(str(sa2), layout="csr", cfg=_layer_cfg(32))
     ip_arr = zarr.open_group(str(sa2), mode="r+")["layers/gexp/indptr"]
     ip_arr[1] = int(ip_arr[1]) + 1
     append(str(sa2), cells=str(sb2), drop_derived=True, extend_layers=True, cfg=_cfg())
@@ -379,7 +384,7 @@ def test_plan_append(tmp_path):
     a, b = _adata(n=30, seed=0), _adata(n=12, seed=1)
     sa = _store(tmp_path, a, "a.zarr")
     sb = _store(tmp_path, b, "b.zarr")
-    add_expr(str(sa), fmt="csr", chunk_elems=32, target_sum=1e6, cfg=_cfg())
+    add_expr(str(sa), layout="csr", target_sum=1e6, cfg=_layer_cfg(32))
 
     plan = plan_append(str(sa), cells=str(sb))
     assert plan.n_new == 12
@@ -397,8 +402,8 @@ def test_plan_append(tmp_path):
     legacy_plan = plan_append(str(sa), cells=str(sb))
     assert legacy_plan.extendable_layers == ("gexp",)  # recognised despite the legacy attr key
 
-    fmt, chunk_elems, target_sum = introspect_gexp(zarr.open_group(str(sa), mode="r")["layers/gexp"])
-    assert (fmt, chunk_elems, target_sum) == ("csr", 32, 1e6)
+    layout, chunk_elems, target_sum = introspect_gexp(zarr.open_group(str(sa), mode="r")["layers/gexp"])
+    assert (layout, chunk_elems, target_sum) == ("csr", 32, 1e6)
 
 
 # ── consolidated store + full lifecycle ─────────────────────────────────────
@@ -408,9 +413,9 @@ def test_ops_on_consolidated_store(tmp_path):
     a, b = _adata(n=30, seed=0), _adata(n=12, seed=1)
     sa = _store(tmp_path, a, "a.zarr", cfg=_cfg(consolidate_metadata=True))
     sb = _store(tmp_path, b, "b.zarr")
-    add_expr(str(sa), fmt="csc", chunk_elems=32, cfg=_cfg())
+    add_expr(str(sa), layout="csc", cfg=_layer_cfg(32))
     append(str(sa), cells=str(sb), drop_derived=True, cfg=_cfg())
-    add_expr(str(sa), fmt="csc", chunk_elems=32, cfg=_cfg())
+    add_expr(str(sa), layout="csc", cfg=_layer_cfg(32))
     got = ad.read_zarr(str(sa))  # reads via the re-consolidated metadata
     assert got.n_obs == 42 and "gexp" in got.layers
 
@@ -423,7 +428,7 @@ def test_lifecycle_plain(tmp_path, caplog):
     sorted1 = tmp_path / "sorted1.zarr"
     sort(str(sa), output=str(sorted1), by=("cell_type",), cfg=_cfg())
     append(str(sorted1), cells=str(sb), drop_derived=True, cfg=_cfg())
-    add_expr(str(sorted1), fmt="csc", chunk_elems=32, cfg=_cfg())
+    add_expr(str(sorted1), layout="csc", cfg=_layer_cfg(32))
     sorted2 = tmp_path / "sorted2.zarr"
     sort(str(sorted1), output=str(sorted2), by=("cell_type",), cfg=_cfg())
     assert any("re-derived" in m for m in _messages(caplog))
@@ -447,7 +452,7 @@ def test_lifecycle_icechunk(tmp_path):
     a, b = _adata(n=30, seed=0), _adata(n=12, seed=1)
     cfg_ic = AppConfig(
         io=IOConfig(backend="icechunk"),
-        chunks=ChunkConfig(x_row_chunk=16, x_col_chunk=4, sparse_flat_chunk=64),
+        chunks=ChunkConfig(row_chunk=16, col_chunk=4, nnz_chunk=64),
     )
     h5 = tmp_path / "a.h5ad"
     a.write_h5ad(h5)
@@ -455,7 +460,7 @@ def test_lifecycle_icechunk(tmp_path):
     convert_h5ad(str(h5), output=str(sa), cfg=cfg_ic)
     sb = _store(tmp_path, b, "b.zarr")
     append(str(sa), cells=str(sb), drop_derived=True, cfg=_cfg())  # icechunk target auto-detected
-    add_expr(str(sa), fmt="csc", chunk_elems=32, cfg=cfg_ic)
+    add_expr(str(sa), layout="csc", cfg=_layer_cfg(32))
 
     sorted_ic = tmp_path / "sorted.icechunk"
     sort(str(sa), output=str(sorted_ic), by=("cell_type",), cfg=cfg_ic)  # icechunk input auto-detected
@@ -480,9 +485,7 @@ def test_cli_store_ops(tmp_path):
     from annizarr._cli import main as run
 
     out = _store(tmp_path, _adata())
-    cfg_file = tmp_path / "cfg.toml"
-    cfg_file.write_text("[chunks]\nsparse_flat_chunk = 32\n")
-    assert run(["add-expr", str(out), "--chunk-elems", "32", "--config", str(cfg_file)]) == 0
+    assert run(["add-expr", str(out), "--col-chunk", "2"]) == 0
     assert "gexp" in ad.read_zarr(str(out)).layers
     assert run(["add-expr", str(tmp_path / "missing.zarr")]) == 1
 
@@ -493,7 +496,72 @@ def test_cli_append_extend_layers(tmp_path):
     a, b = _adata(n=30, seed=0), _adata(n=12, seed=1)
     sa = _store(tmp_path, a, "a.zarr")
     sb = _store(tmp_path, b, "b.zarr")
-    add_expr(str(sa), fmt="csr", chunk_elems=32, cfg=_cfg())
+    add_expr(str(sa), layout="csr", cfg=_layer_cfg(32))
     assert run(["append", str(sa), str(sb), "--extend-layers", "--drop-derived"]) == 0
     got = ad.read_zarr(str(sa))
     np.testing.assert_allclose(got.layers["gexp"].toarray(), _expected_gexp(sp.vstack([a.X, b.X])), rtol=1e-5)
+
+
+def test_append_reads_nullable_string_index_written_by_anndata(tmp_path):
+    # anndata itself (pandas 3, or dtype="string" on pandas 2) stores the obs index as a
+    # nullable-string-array group; append must read and extend that encoding too
+    a, b = _adata(n=8, seed=0), _adata(n=3, seed=1)
+    for x in (a, b):
+        x.obs.index = x.obs.index.astype("string")
+        x.obsm.clear()
+    sa, sb = tmp_path / "a.zarr", tmp_path / "b.zarr"
+    previous = ad.settings.allow_write_nullable_strings
+    ad.settings.allow_write_nullable_strings = True  # pandas 2 refuses nullable strings unless opted in
+    try:
+        a.write_zarr(sa)
+        b.write_zarr(sb)
+    finally:
+        ad.settings.allow_write_nullable_strings = previous
+    assert not isinstance(zarr.open_group(str(sa), mode="r")["obs/_index"], zarr.Array)
+    plan = plan_append(str(sa), cells=str(sb))
+    assert plan.n_new == 3 and plan.n_duplicate_names == 0
+    append(str(sa), cells=str(sb), cfg=_cfg())
+    got = ad.read_zarr(str(sa))
+    assert got.n_obs == 11 and list(got.obs_names) == [*a.obs_names, *b.obs_names]
+
+
+def test_append_keeps_store_encoding_for_string_like_columns(tmp_path):
+    """The store column's encoding wins: a categorical gains categories for unseen values whether
+    the cells arrive as a differently coded categorical or as plain strings; a plain string column
+    takes categorical cells as strings; an ordered categorical still has to match exactly."""
+    a, b, c = _adata(n=6, seed=0), _adata(n=4, seed=1), _adata(n=3, seed=2)
+    for x in (a, b, c):
+        x.obsm.clear()
+    a.obs["batch"] = pd.Categorical(["b1", "b2", "b1", "b2", "b1", "b2"])
+    a.obs["sample"] = [f"s{i}" for i in range(6)]  # unique per row -> stays a string column on disk
+    b.obs["batch"] = pd.Categorical(["b3", "b2", "b3", "b2"])  # different category set and codes
+    b.obs["sample"] = pd.Categorical(["s9", "s9", "s8", "s8"])  # categorical into a string column
+    c.obs["batch"] = ["b4", "b5", "b6"]  # unique per row -> a string column into a categorical
+    c.obs["sample"] = [f"t{i}" for i in range(3)]
+    sa, sb, sc = (_store(tmp_path, x, f"{n}.zarr") for x, n in ((a, "a"), (b, "b"), (c, "c")))
+    assert zarr.open_group(str(sa), mode="r")["obs/batch"].attrs["encoding-type"] == "categorical"
+    assert zarr.open_group(str(sa), mode="r")["obs/sample"].attrs["encoding-type"] != "categorical"
+
+    plan = plan_append(str(sa), cells=str(sb))
+    assert any("'batch': 1 new category appended (b3)" in n for n in plan.notes), plan.notes
+    append(str(sa), cells=str(sb), cfg=_cfg())
+    append(str(sa), cells=str(sc), cfg=_cfg())
+
+    got = ad.read_zarr(str(sa))
+    assert got.n_obs == 13
+    assert got.obs["batch"].dtype == "category"
+    assert list(got.obs["batch"].cat.categories) == ["b1", "b2", "b3", "b4", "b5", "b6"]
+    assert list(got.obs["batch"]) == [*a.obs["batch"], *b.obs["batch"], *c.obs["batch"]]
+    assert got.obs["sample"].dtype != "category"
+    assert list(got.obs["sample"]) == [*a.obs["sample"], *b.obs["sample"], *c.obs["sample"]]
+    assert list(got.obs["cell_type"].cat.categories) == ["a", "b", "c"]  # untouched when nothing is new
+
+    # ordered categoricals carry meaning in their order: still an exact-match requirement
+    d, e = _adata(n=4, seed=3), _adata(n=2, seed=4)
+    for x in (d, e):
+        x.obsm.clear()
+    d.obs["grade"] = pd.Categorical(["lo", "hi", "lo", "hi"], categories=["lo", "hi"], ordered=True)
+    e.obs["grade"] = pd.Categorical(["mid", "hi"], categories=["lo", "mid", "hi"], ordered=True)
+    sd, se = _store(tmp_path, d, "d.zarr"), _store(tmp_path, e, "e.zarr")
+    with pytest.raises(ConversionError, match="ordered categorical"):
+        plan_append(str(sd), cells=str(se))

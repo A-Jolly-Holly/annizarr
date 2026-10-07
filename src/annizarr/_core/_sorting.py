@@ -14,11 +14,11 @@ import scipy.sparse as sp
 import zarr
 
 from annizarr._core._runtime import configure_runtime, stage
-from annizarr._core._validation import validate_single_cell_anndata
+from annizarr._core._validation import require_matrix
 from annizarr._core._zarr import get_array
 from annizarr._sources._readers import ConcatReader, CSRZarrReader, as_reader
 from annizarr._storage import open_output_store
-from annizarr._writers._encoding import autoshard_setting, make_sparse_group, set_array_attrs, write_elem
+from annizarr._writers._encoding import autoshard_setting, make_sparse_group, prepare_frame, set_array_attrs, write_elem
 from annizarr._writers._matrix import write_matrix
 from annizarr.errors import ConversionError
 
@@ -60,8 +60,8 @@ def maybe_sort_adata(adata: ad.AnnData, cfg: AppConfig) -> ad.AnnData:
         return adata
 
     sort_by = cfg.grouping.sort_by
-    if cfg.io.x_storage not in ("csr", "dense"):
-        raise ConversionError(f"grouping (sort_by) requires x_storage='csr' or 'dense'; got '{cfg.io.x_storage}'.")
+    if cfg.io.layout not in ("csr", "dense"):
+        raise ConversionError(f"grouping (sort_by) requires layout='csr' or 'dense'; got '{cfg.io.layout}'.")
     if cfg.io.lazy:
         raise ConversionError(
             "grouping (sort_by) requires an eager (in-memory) load; not supported with --lazy yet. Omit --lazy to sort."
@@ -83,26 +83,25 @@ def _write_sorted_lazy(
 ) -> str | None:
     # streams X into temp per-group CSR stores (peak RAM one row-batch), unlike
     # maybe_sort_adata's adata[perm].copy() (~2x X in RAM).
-    if cfg.io.x_storage != "csr":
+    if cfg.io.layout != "csr":
         raise ConversionError(
-            f"--lazy --sort-by supports x_storage='csr' only (got '{cfg.io.x_storage}'). "
-            "Omit --lazy to sort dense/CSC eagerly."
+            f"lazy --sort-by supports layout='csr' only (got '{cfg.io.layout}'). "
+            "Pass --eager to sort dense/CSC in memory."
         )
-    if adata.layers or adata.raw is not None or len(adata.obsp) > 0:
+    has_layers = any(k is not None for k in adata.layers.keys())  # anndata>=0.13 lists X under None
+    if has_layers or adata.raw is not None or len(adata.obsp) > 0:
         raise ConversionError(
-            "--lazy --sort-by does not reorder layers/raw/obsp yet (they are obs-aligned and "
-            "would need their own streamed reorder). Omit --lazy to sort eagerly, or drop them."
+            "lazy --sort-by does not reorder layers/raw/obsp yet (they are obs-aligned and "
+            "would need their own streamed reorder). Pass --eager to sort in memory, or drop them."
         )
     x = adata.X
     if sp.issparse(x) or getattr(x, "format", None) != "csr":
         got = "in-memory " + type(x).__name__ if sp.issparse(x) else (getattr(x, "format", None) or type(x).__name__)
         raise ConversionError(
-            f"--lazy --sort-by requires the lazy input's X to be CSR on disk; got {got}. Omit --lazy to sort eagerly."
+            f"lazy --sort-by requires the lazy input's X to be CSR on disk; got {got}. Pass --eager to sort in memory."
         )
 
-    validation_result = validate_single_cell_anndata(adata, cfg.validation)
-    for w in validation_result.warnings:
-        logger.warning(w)
+    require_matrix(adata)
     sort_by = cfg.grouping.sort_by
     snapshot_id = stream_sorted_store(
         x,
@@ -228,8 +227,8 @@ def stream_sorted_store(
             store.attrs["encoding-version"] = "0.1.0"
             with autoshard_setting(cfg.chunks.auto_shard):
                 with stage("Writing metadata (sorted obs/obsm; var/varm/varp/uns as-is)"):
-                    write_elem(store, "obs", obs.iloc[perm])
-                    write_elem(store, "var", var)
+                    write_elem(store, "obs", prepare_frame(obs.iloc[perm]))
+                    write_elem(store, "var", prepare_frame(var))
                     write_elem(store, "uns", dict(uns))
                     write_elem(
                         store, "obsm", {k: (v.iloc[perm] if hasattr(v, "iloc") else v[perm]) for k, v in obsm.items()}

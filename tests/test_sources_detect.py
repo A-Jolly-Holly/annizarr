@@ -22,7 +22,7 @@ from annizarr.sources import Source, detect_format, open_source, register_source
 
 
 def _cfg(**io) -> AppConfig:
-    return AppConfig(io=IOConfig(**io), chunks=ChunkConfig(x_row_chunk=4, x_col_chunk=4, sparse_flat_chunk=64))
+    return AppConfig(io=IOConfig(**io), chunks=ChunkConfig(row_chunk=4, col_chunk=4, nnz_chunk=64))
 
 
 def _make_10x_v3(path: Path) -> None:

@@ -59,7 +59,7 @@ def test_convert_flag_mappings(tmp_path: Path) -> None:
     # --auto-shard shards the sparse X arrays
     h5_big = make_h5ad(tmp_path, "big.h5ad", adata=make_adata(n_obs=30, n_vars=20))
     out_shard = tmp_path / "shard.zarr"
-    assert main(["convert", str(h5_big), "-o", str(out_shard), "--x-storage", "csr", "--auto-shard"]) == 0
+    assert main(["convert", str(h5_big), "-o", str(out_shard), "--layout", "csr", "--auto-shard"]) == 0
     assert_anndata_readable(out_shard)
     root = zarr.open_group(str(out_shard), mode="r")
     assert root["X"]["data"].shards is not None
@@ -69,10 +69,6 @@ def test_convert_arg_guards(tmp_path: Path) -> None:
     h5 = make_h5ad(tmp_path, "a.h5ad")
     with pytest.raises(SystemExit) as exc:
         main(["convert", str(h5), "-o", str(tmp_path / "out.zarr"), "--obs-columns", "cell_type"])
-    assert exc.value.code == 2
-
-    with pytest.raises(SystemExit) as exc:
-        main(["convert", str(h5), "-o", str(tmp_path / "out2.zarr"), "--lazy", "--eager"])
     assert exc.value.code == 2
 
 
@@ -119,7 +115,7 @@ def test_op_happy_paths(tmp_path: Path) -> None:
     h5 = make_h5ad(tmp_path, "in.h5ad")
     out = tmp_path / "out.zarr"
     assert main(["convert", str(h5), "-o", str(out)]) == 0
-    assert main(["add-expr", str(out), "--chunk-elems", "16"]) == 0
+    assert main(["add-expr", str(out), "--col-chunk", "2"]) == 0
     assert_anndata_readable(out)
     assert "gexp" in ad.read_zarr(str(out)).layers
 
@@ -127,7 +123,7 @@ def test_op_happy_paths(tmp_path: Path) -> None:
     store = tmp_path / "store.zarr"
     assert main(["convert", str(h5_r), "-o", str(store)]) == 0
     rechunked = tmp_path / "rechunked.zarr"
-    assert main(["rechunk", str(store), "-o", str(rechunked), "--sparse-flat-chunk", "4"]) == 0
+    assert main(["rechunk", str(store), "-o", str(rechunked), "--row-chunk", "2"]) == 0
     assert ad.read_zarr(str(rechunked)).n_obs == 8
 
     # non-decreasing codes after sort is checked regardless of the input's initial order,
@@ -142,7 +138,7 @@ def test_op_happy_paths(tmp_path: Path) -> None:
 
 
 def test_append_happy_path(tmp_path: Path) -> None:
-    # store side (a) must carry no obsm/obsp/layers, or append needs --drop-derived/-y
+    # store side (a) must carry no obsm/obsp/layers, or append needs --drop-derived
     # (see test_append_without_consent_errors_and_exits_1); the cells side (b) is unaffected
     a_adata = make_adata(n_obs=4, seed=0)
     a_adata.obsm.clear()
@@ -151,7 +147,7 @@ def test_append_happy_path(tmp_path: Path) -> None:
     sa, sb = tmp_path / "a.zarr", tmp_path / "b.zarr"
     assert main(["convert", str(a), "-o", str(sa)]) == 0
     assert main(["convert", str(b), "-o", str(sb)]) == 0
-    assert main(["append", str(sa), str(sb), "-y"]) == 0
+    assert main(["append", str(sa), str(sb)]) == 0  # nothing would drop, so no consent needed
     assert ad.read_zarr(str(sa)).n_obs == 6
 
 
@@ -165,21 +161,8 @@ def test_append_without_consent_errors_and_exits_1(tmp_path: Path, capsys: pytes
     # non-TTY stdin (the pytest default): no prompt, just an error naming the escape hatches
     assert main(["append", str(sa), str(sb)]) == 1
     err = capsys.readouterr().err
-    assert "error:" in err and "--drop-derived" in err and "-y" in err
+    assert "error:" in err and "--drop-derived" in err
     assert ad.read_zarr(str(sa)).n_obs == 4  # nothing was mutated
-
-
-def test_append_with_yes_drops_obsm_and_succeeds(tmp_path: Path) -> None:
-    a = make_h5ad(tmp_path, "a.h5ad", adata=make_adata(n_obs=4, seed=0))
-    b = make_h5ad(tmp_path, "b.h5ad", adata=make_adata(n_obs=2, seed=1))
-    sa, sb = tmp_path / "a.zarr", tmp_path / "b.zarr"
-    assert main(["convert", str(a), "-o", str(sa)]) == 0
-    assert main(["convert", str(b), "-o", str(sb)]) == 0
-
-    assert main(["append", str(sa), str(sb), "-y"]) == 0
-    got = ad.read_zarr(str(sa))
-    assert got.n_obs == 6
-    assert "X_pca" not in got.obsm
 
 
 def test_append_with_drop_derived_succeeds(tmp_path: Path) -> None:
@@ -190,7 +173,9 @@ def test_append_with_drop_derived_succeeds(tmp_path: Path) -> None:
     assert main(["convert", str(b), "-o", str(sb)]) == 0
 
     assert main(["append", str(sa), str(sb), "--drop-derived"]) == 0
-    assert ad.read_zarr(str(sa)).n_obs == 6
+    got = ad.read_zarr(str(sa))
+    assert got.n_obs == 6
+    assert "X_pca" not in got.obsm
 
 
 # ── --help / import guards ───────────────────────────────────────────────────
@@ -203,8 +188,8 @@ def test_help_shows_config_defaults(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit) as exc:
         main(["convert", "--help"])
     assert exc.value.code == 0
-    out = capsys.readouterr().out
-    assert f"default: {ChunkConfig().x_row_chunk}" in out
+    out = " ".join(capsys.readouterr().out.split())  # argparse wraps help text; compare on one line
+    assert "default: 2048" in out and f"{ChunkConfig().nnz_chunk} nonzeros" in out
 
 
 def test_help_usage_names_annizarr(capsys: pytest.CaptureFixture[str]) -> None:
@@ -212,17 +197,6 @@ def test_help_usage_names_annizarr(capsys: pytest.CaptureFixture[str]) -> None:
         main(["--help"])
     assert exc.value.code == 0
     assert capsys.readouterr().out.startswith("usage: annizarr")
-
-
-def test_config_auto_shard_applies_without_the_flag(tmp_path: Path) -> None:
-    """Omitting --auto-shard leaves a config file's auto_shard = true in force."""
-    h5 = make_h5ad(tmp_path, "in.h5ad", adata=make_adata(n_obs=30, n_vars=20))
-    cfg_file = tmp_path / "config.toml"
-    cfg_file.write_text("[chunks]\nauto_shard = true\n")
-    out = tmp_path / "out.zarr"
-    assert main(["convert", str(h5), "-o", str(out), "--config", str(cfg_file)]) == 0
-    root = zarr.open_group(str(out), mode="r")
-    assert root["X"]["data"].shards is not None
 
 
 def test_cli_import_leaves_numpy_unimported() -> None:

@@ -4,10 +4,10 @@ from typing import TYPE_CHECKING, Any
 
 import zarr
 
-from annizarr._core._config import AppConfig, load_config, resolve_backend_cfg
+from annizarr._core._config import AppConfig, resolve_backend_cfg
 from annizarr._core._layout import dense_shards, write_grid
 from annizarr._core._runtime import configure_runtime, run_parallel, stage
-from annizarr._core._zarr import get_group, shape_attr
+from annizarr._core._zarr import get_group, has_element, shape_attr
 from annizarr._storage import check_output_target, open_input_group, open_output_store, store_name
 from annizarr._writers._encoding import sparse_shards, suppress_autoshard_warning
 from annizarr.errors import ConversionError
@@ -23,7 +23,7 @@ def rechunk(
     store: PathLike,
     *,
     output: PathLike,
-    array: str = "X",
+    matrix: str = "X",
     cfg: AppConfig | None = None,
     branch: str | None = None,
     message: str | None = None,
@@ -36,15 +36,15 @@ def rechunk(
         Existing AnnData zarr (or Icechunk) store to read from.
     output
         Destination store path or URI.
-    array
-        The matrix element to rechunk: ``"X"``, ``"layers/<name>"``, or ``"raw/X"``.
+    matrix
+        Which matrix to rechunk: ``"X"``, ``"layers/<name>"``, or ``"raw/X"``.
     cfg
-        Resolved configuration; ``None`` loads :func:`~annizarr.config.load_config` defaults.
+        Resolved configuration; ``None`` uses the :class:`~annizarr.config.AppConfig` defaults.
     branch
         Icechunk branch to write ``output`` to; created off the current tip if it
         doesn't exist yet. Ignored for plain zarr.
     message
-        Icechunk commit message; ``None`` names the op and ``array``.
+        Icechunk commit message; ``None`` names the op and ``matrix``.
 
     Returns
     -------
@@ -53,7 +53,7 @@ def rechunk(
     Raises
     ------
     ConversionError
-        ``array`` is not a matrix element present on ``store``.
+        ``matrix`` is not a matrix element present on ``store``.
     """
     import anndata as ad
     from anndata.io import read_elem
@@ -61,7 +61,7 @@ def rechunk(
     from annizarr._writers._encoding import autoshard_setting, write_elem
 
     if cfg is None:
-        cfg = load_config()
+        cfg = AppConfig()
     cfg = resolve_backend_cfg(cfg)
     check_output_target(output, cfg)
     configure_runtime(cfg.chunks.cpus)
@@ -70,13 +70,13 @@ def rechunk(
     matrix_keys = ["X"]
     if "layers" in src:
         matrix_keys += [f"layers/{k}" for k in get_group(src, "layers")]
-    if "raw" in src and "X" in get_group(src, "raw"):
+    if has_element(src, "raw") and "X" in get_group(src, "raw"):
         matrix_keys.append("raw/X")
-    if array not in matrix_keys:
-        raise ConversionError(f"array '{array}' is not a matrix element ({matrix_keys}).")
+    if matrix not in matrix_keys:
+        raise ConversionError(f"matrix '{matrix}' is not a matrix element ({matrix_keys}).")
 
     ad.settings.zarr_write_format = 3
-    commit_message = message or f"annizarr rechunk {array} → {store_name(output)}"
+    commit_message = message or f"annizarr rechunk {matrix} → {store_name(output)}"
     out = open_output_store(
         output, cfg, commit_message=commit_message, branch=branch, expected_shape=_matrix_shape(src["X"])
     )
@@ -104,7 +104,7 @@ def rechunk(
                             _copy_matrix(node, dst, f"{key}/{child}", cfg, rechunk=False)
                         else:
                             write_elem(g, child, read_elem(node))
-                if "raw" in src:
+                if has_element(src, "raw"):
                     src_raw = get_group(src, "raw")
                     raw = dst.require_group("raw")
                     raw.attrs.update(dict(src_raw.attrs))
@@ -118,7 +118,7 @@ def rechunk(
                 layers.attrs.update(dict(src_layers.attrs))
 
             for key in matrix_keys:
-                rechunked = key == array
+                rechunked = key == matrix
                 with stage(f"{'Rechunking' if rechunked else 'Copying'} {key}"):
                     _copy_matrix(src[key], dst, key, cfg, rechunk=rechunked)
 
@@ -146,9 +146,8 @@ def _copy_matrix(node: Any, dst_root: Any, key: str, cfg: AppConfig, *, rechunk:
     if isinstance(node, zarr.Array):
         n_rows, n_cols = node.shape
         if rechunk:
-            row_chunk = min(cfg.chunks.x_row_chunk, n_rows)
-            col_chunk = min(cfg.chunks.x_col_chunk, n_cols)
-            layout = dense_shards(row_chunk, col_chunk, n_rows, n_cols, cfg.chunks.x_shard_factor)
+            row_chunk, col_chunk = _layout.dense_chunks(cfg.chunks, n_rows, n_cols)
+            layout = dense_shards(row_chunk, col_chunk, n_rows, n_cols, cfg.chunks.shard_factor)
             out_chunks, shards = layout.chunks, layout.shards
         else:
             out_chunks = (node.chunks[0], node.chunks[1])
@@ -184,7 +183,9 @@ def _copy_matrix(node: Any, dst_root: Any, key: str, cfg: AppConfig, *, rechunk:
     # rechunk=False (copy-as-is) preserves the source's exact chunk+shard shape, so a copy
     # never silently drops sharding.
     if rechunk:
-        flat = min(cfg.chunks.sparse_flat_chunk, max(1, nnz))
+        n_rows, n_cols = _matrix_shape(node)
+        csr = enc == "csr_matrix"
+        flat = _layout.sparse_flat_chunk(cfg.chunks, csr=csr, nnz=nnz, n_major=n_rows if csr else n_cols)
         out_shards = sparse_shards(cfg.chunks.auto_shard)
     else:
         flat = node["data"].chunks[0]

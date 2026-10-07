@@ -20,7 +20,7 @@ import pytest
 
 import annizarr
 from _readable import assert_anndata_readable
-from annizarr.config import apply_cli_overrides, load_config
+from annizarr.config import AppConfig, apply_cli_overrides
 
 GOLDEN_DIR = Path(__file__).parent / "golden"
 TARBALLS = sorted(GOLDEN_DIR.glob("*.tar.gz"))
@@ -53,17 +53,17 @@ def _assert_stores_equal(expected_root: Path, actual_root: Path) -> None:
 
 
 def _build_cfg(case: dict[str, Any]) -> Any:
-    # case.json's "backed" key is baked into the (un-regenerated) golden tarballs verbatim;
-    # map it onto the renamed apply_cli_overrides(lazy=) kwarg here rather than touching them.
+    # case.json keeps the pre-rename key names ("backed", "x_storage", "x_row_chunk", ...), baked
+    # into the un-regenerated golden tarballs; map them onto today's kwargs here rather than touching them.
     return apply_cli_overrides(
-        load_config(),
-        x_storage=case["x_storage"],
+        AppConfig(),
+        layout=case["x_storage"],
         lazy=case.get("backed", False),
         cpus=case.get("cpus"),
-        x_row_chunk=case.get("x_row_chunk"),
-        x_col_chunk=case.get("x_col_chunk"),
-        sparse_flat_chunk=case.get("sparse_flat_chunk"),
-        x_shard_factor=case.get("x_shard_factor"),
+        row_chunk=case.get("x_row_chunk"),
+        col_chunk=case.get("x_col_chunk"),
+        nnz_chunk=case.get("sparse_flat_chunk"),
+        shard_factor=case.get("x_shard_factor"),
         auto_shard=case.get("auto_shard", False),
         sort_by=case.get("sort_by"),
     )

@@ -8,13 +8,13 @@ from annizarr._cli._args import (
     add_autoshard_arg,
     add_branch_arg,
     add_chunk_args,
-    add_config_arg,
     add_consolidate_arg,
     add_cpus_arg,
     add_ic_arg,
     add_message_arg,
     add_overwrite_arg,
     build_config,
+    reject_off_axis_chunks,
 )
 
 _LOG = logging.getLogger(__name__)
@@ -26,34 +26,32 @@ def add_add_expr_parser(subparsers: argparse._SubParsersAction[argparse.Argument
     # defaults below are literals, kept in sync by hand with add_expr's signature: importing
     # it here would pull in numpy/zarr on every CLI invocation, even --version.
     p.add_argument(
-        "--format",
-        dest="format",
+        "--layout",
+        dest="layer_layout",  # not cfg.io.layout (X's layout): this is the new layer's
         choices=("csr", "csc", "dense"),
         default="csc",
-        help="layer storage format (default: csc)",
+        help="on-disk layout of the new layer (default: csc)",
     )
     p.add_argument("--layer", default="gexp", help="layer name (default: gexp)")
-    p.add_argument(
-        "--chunk-elems", type=int, default=1_000_000, help="chunk size (elements) for the layer (default: 1000000)"
-    )
     p.add_argument("--target-sum", type=float, default=1e4, help="library-size normalization target (default: 10000.0)")
+    add_chunk_args(p)
     add_autoshard_arg(p)
+    add_cpus_arg(p)
     add_overwrite_arg(p)
     add_branch_arg(p)
     add_message_arg(p)
-    add_config_arg(p)
-    p.set_defaults(func=_run_add_expr)
+    p.set_defaults(func=_run_add_expr, _parser=p)
 
 
 def _run_add_expr(args: argparse.Namespace) -> int:
     from annizarr.ops import add_expr
 
     cfg = build_config(args)
+    reject_off_axis_chunks(args._parser, args, args.layer_layout)
     result = add_expr(
         args.store,
-        fmt=args.format,
+        layout=args.layer_layout,
         layer=args.layer,
-        chunk_elems=args.chunk_elems,
         target_sum=args.target_sum,
         overwrite=bool(args.overwrite),
         cfg=cfg,
@@ -70,7 +68,7 @@ def add_rechunk_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentP
     p = subparsers.add_parser("rechunk", help="Rewrite one matrix with new chunking; stream-copy the rest as-is")
     p.add_argument("store", metavar="STORE")
     p.add_argument("-o", "--output", required=True, help="output store path or URI")
-    p.add_argument("--array", default="X", help="matrix element to rechunk (X, layers/<name>, raw/X) (default: X)")
+    p.add_argument("--matrix", default="X", help="which matrix to rechunk: X, layers/<name>, or raw/X (default: X)")
     add_chunk_args(p)
     add_autoshard_arg(p)
     add_cpus_arg(p)
@@ -79,7 +77,6 @@ def add_rechunk_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentP
     add_ic_arg(p)
     add_branch_arg(p)
     add_message_arg(p)
-    add_config_arg(p)
     p.set_defaults(func=_run_rechunk)
 
 
@@ -88,7 +85,7 @@ def _run_rechunk(args: argparse.Namespace) -> int:
 
     cfg = build_config(args)
     result = rechunk(
-        args.store, output=args.output, array=args.array, cfg=cfg, branch=args.branch, message=args.message
+        args.store, output=args.output, matrix=args.matrix, cfg=cfg, branch=args.branch, message=args.message
     )
     _LOG.info(f"wrote {result.path} ({result.n_obs} x {result.n_vars})")
     if result.snapshot_id is not None:
@@ -115,7 +112,6 @@ def add_sort_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentPars
     add_ic_arg(p)
     add_branch_arg(p)
     add_message_arg(p)
-    add_config_arg(p)
     p.set_defaults(func=_run_sort)
 
 
@@ -137,23 +133,17 @@ def add_append_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentPa
     p.add_argument(
         "--drop-derived",
         action="store_true",
-        help="consent to dropping derived obs-aligned elements (obsm/obsp/incompatible layers)",
+        help="consent up front to dropping derived obs-aligned elements (obsm/obsp/incompatible layers); "
+        "without it you are prompted",
     )
     p.add_argument(
         "--extend-layers",
         action="store_true",
         help="extend eligible add-expr CSR layers in place instead of dropping them",
     )
-    p.add_argument(
-        "-y",
-        "--yes",
-        dest="assume_yes",
-        action="store_true",
-        help="assume yes for the loss-plan prompt",
-    )
+    add_cpus_arg(p)
     add_branch_arg(p)
     add_message_arg(p)
-    add_config_arg(p)
     p.set_defaults(func=_run_append)
 
 
@@ -182,7 +172,7 @@ def _run_append(args: argparse.Namespace) -> int:
     would_drop = bool(plan.drops(extend_layers=args.extend_layers))
 
     drop_derived = bool(args.drop_derived)
-    if would_drop and not args.drop_derived and not args.assume_yes:
+    if would_drop and not drop_derived:
         if sys.stdin.isatty():
             sys.stderr.write("Proceed? [y/N] ")
             sys.stderr.flush()
@@ -192,10 +182,8 @@ def _run_append(args: argparse.Namespace) -> int:
                 return 1
             drop_derived = True
         else:
-            _LOG.error("error: append would drop derived elements; pass --drop-derived or -y to confirm")
+            _LOG.error("error: append would drop derived elements; pass --drop-derived to confirm")
             return 1
-    elif args.assume_yes:
-        drop_derived = True
 
     result = append(
         args.store,
