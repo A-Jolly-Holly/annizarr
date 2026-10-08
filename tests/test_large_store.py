@@ -17,7 +17,7 @@ even a fully in-memory sparse round-trip) would need; a run on a 12-core dev box
 0.2-1.5GB across the five steps (see the agent report for the exact numbers), comfortably
 under ``CEILINGS``.
 
-Run explicitly: ``pixi run -e default pytest tests/test_large_store.py -m slow -q
+Run explicitly: ``pytest tests/test_large_store.py -m slow -q
 -p no:cacheprovider --no-cov -s``. Excluded from the default suite by
 ``addopts = "-m 'not slow'"``.
 """

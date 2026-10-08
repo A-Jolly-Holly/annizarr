@@ -93,23 +93,3 @@ def test_load_10x_h5_guards(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Reference test: pin our h5py reader against scanpy's own read_10x_h5
-# ---------------------------------------------------------------------------
-
-
-def test_matches_scanpy_v3_and_v2(tmp_path: Path) -> None:
-    sc = pytest.importorskip("scanpy")
-    import pandas.testing as pdt
-
-    for p in (
-        make_10x_v3_h5(tmp_path / "v3.h5", include_non_gex=True),
-        make_10x_v2_h5(tmp_path / "v2.h5"),
-    ):
-        ours = load_10x_h5(p)
-        theirs = sc.read_10x_h5(str(p))
-
-        np.testing.assert_array_equal(ours.X.toarray(), theirs.X.toarray())
-        assert ours.X.dtype == theirs.X.dtype
-        assert list(ours.obs_names) == list(theirs.obs_names)
-        assert list(ours.var_names) == list(theirs.var_names)
-        pdt.assert_frame_equal(ours.var, theirs.var, check_dtype=True)

@@ -32,7 +32,7 @@ self-snapshots of annizarr's own output, regenerate with the package installed i
 own env, no old converter and no git worktree needed:
 
 ```bash
-cd tools/annizarr && pixi run -e default python tests/golden/generate.py
+python tests/golden/generate.py
 ```
 
 This overwrites every `tests/golden/*.tar.gz` in place; review the diff before committing.

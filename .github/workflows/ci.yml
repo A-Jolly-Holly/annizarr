@@ -1,5 +1,6 @@
-# PR and push gate on the locked pixi environments: the same versions as local development, so an
-# upstream release never turns a PR red on its own. Fresh-resolve testing lives in deps.yml.
+# Every PR and push installs fresh from PyPI, the way a user does, and runs the gates at both ends of
+# the supported Python range: `all` on the newest release with every extra, `core` on the 3.12 floor
+# with the hard dependencies only. The slow memory-ceiling test runs on pushes to main.
 name: CI
 
 on:
@@ -9,23 +10,38 @@ on:
     branches: [main]
 
 jobs:
-  checks:
+  all:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
-      - uses: prefix-dev/setup-pixi@v0.11.0
+      - uses: actions/setup-python@v5
         with:
-          environments: default core
-          locked: true
-          cache: true
+          python-version: '3.x'  # the newest release
 
-      - run: pixi run -e default ruff check src tests docs
-      - run: pixi run -e default ruff format --check src tests docs
-      - run: pixi run -e default mypy --strict src/annizarr
-      - run: pixi run -e default pytest  # coverage gate is in pyproject.toml
-      - run: pixi run -e core pytest --no-cov  # hard deps only: the extras stay optional
+      - run: pip install ".[icechunk,dev]"
+      - run: pip freeze | grep -iE '^(anndata|zarr|icechunk|pandas|numpy|scipy|h5py)=='
+      - run: ruff check src tests docs
+      - run: ruff format --check src tests docs
+      - run: mypy --strict src/annizarr
+      - run: pytest  # coverage gate is in pyproject.toml
+      - run: pytest -m slow --no-cov  # memory-ceiling test, about a minute
+        if: github.event_name == 'push'
+
+  core:
+    # hard deps only, on the oldest supported Python: the extras stay optional and the floor holds
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - run: pip install . pytest pytest-cov hypothesis
+      - run: pytest --no-cov
 
   build:
     runs-on: ubuntu-latest
@@ -35,7 +51,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.13'
+          python-version: '3.x'
 
       - run: pip install build twine
       - run: python -m build

@@ -16,19 +16,18 @@ classifiers = [
   "Intended Audience :: Science/Research",
   "Topic :: Scientific/Engineering :: Bio-Informatics",
   "Programming Language :: Python :: 3",
-  "Programming Language :: Python :: 3.12",
-  "Programming Language :: Python :: 3.13",
   "Operating System :: OS Independent",
 ]
 dependencies = [
   "anndata>=0.13",  # 0.13 lists X in .layers under None
   "pandas>=2.3",  # imported directly (frame prep, append); floor matches anndata's
   "zarr>=3.3",
-  "numpy>=1.24",
-  "scipy>=1.10",
-  "h5py>=3.8",
+  "numpy>=2.1",
+  "scipy>=1.14",
+  "h5py>=3.11",
 ]
-# lower bounds only: the floors are the versions the writers were verified against
+# lower bounds only; numpy/scipy/h5py/pandas floors follow anndata's own (the hard dependency sets
+# the real minimum anyway), zarr and icechunk floors are the versions the writers were verified against
 
 [project.optional-dependencies]
 icechunk = ["icechunk>=2.1.2", "boto3>=1.28"]
@@ -39,10 +38,8 @@ dev = [
   "ruff",
   "mypy",
   "moto[s3,server]>=5",  # server: ThreadedMotoServer, needed by tests/test_ic_copy_s3.py
-  "scanpy>=1.10",
   "build",
   "twine",
-  "pre-commit",
 ]
 
 [project.urls]
@@ -88,7 +85,6 @@ warn_unused_ignores = true
 [[tool.mypy.overrides]]
 module = [
   "anndata.*",
-  "scanpy.*",
   "scipy.*",
   "pandas.*",
   "h5py.*",

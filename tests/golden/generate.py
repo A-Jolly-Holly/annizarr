@@ -11,7 +11,7 @@ attrs, sharding math, …) fails loudly.
 
 Regenerate with (see ../../tests/golden/README.md for the policy):
 
-    cd tools/annizarr && pixi run -e default python tests/golden/generate.py
+    python tests/golden/generate.py
 """
 
 from __future__ import annotations

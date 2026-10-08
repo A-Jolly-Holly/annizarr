@@ -3,6 +3,8 @@
 name: annizarr-publish
 
 on:
+  push:
+    tags: ['v*']
   workflow_dispatch:
     inputs:
       test_pypi:

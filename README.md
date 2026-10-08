@@ -15,11 +15,7 @@ pip install annizarr
 pip install "annizarr[icechunk]"
 ```
 
-To work on the code instead, use the pixi dev environment:
-
-```bash
-pixi install
-```
+To work on the code instead, see [Development](#development).
 
 ## Quickstart usage
 
@@ -112,12 +108,12 @@ the committed Icechunk snapshot id otherwise.
 ## Development
 
 ```bash
-pixi install
-pixi run -e default pytest              # excludes -m slow by default
-pixi run -e default pytest -m slow      # large synthetic-store memory-ceiling test
-pixi run -e default ruff check .
-pixi run -e default mypy --strict src/annizarr
-pre-commit run --all-files
+python -m venv .venv && source .venv/bin/activate
+pip install -e ".[icechunk,dev]"
+pytest                                  # excludes -m slow by default
+pytest -m slow --no-cov                 # large synthetic-store memory-ceiling test
+ruff check src tests docs && ruff format --check src tests docs
+mypy --strict src/annizarr
 ```
 
 Golden stores for regression tests live in `tests/golden/`.
