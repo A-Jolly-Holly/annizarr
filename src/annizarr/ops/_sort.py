@@ -102,13 +102,12 @@ def sort(
 
     after_write = None
     if gexp_params is not None:
-        layout, flat_chunk, target_sum = gexp_params
+        layout = gexp_params.layout
+        target_sum = gexp_params.target_sum
         if target_sum is None:
             logger.warning("layers/gexp has no recorded target_sum; re-deriving at 1e4.")
             target_sum = 1e4
-        # pin the existing layer's flat chunk through nnz_chunk (axis chunks cleared) so the
-        # re-derived layer is laid out like the original
-        layer_cfg = replace(cfg, chunks=replace(cfg.chunks, row_chunk=None, col_chunk=None, nnz_chunk=flat_chunk))
+        layer_cfg = replace(cfg, chunks=gexp_params.chunks(cfg.chunks))
 
         def after_write(root: zarr.Group, layout: Layout = layout, target_sum: float = target_sum) -> None:
             # re-derives gexp before stream_sorted_store's finalize(), so it lands in the

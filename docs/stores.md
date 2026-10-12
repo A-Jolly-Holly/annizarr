@@ -43,9 +43,17 @@ at least one gene, and an X.
 ## Streaming and parallelism
 
 Inputs stream band by band by default (`--eager` loads the whole input first), so peak memory is
-set by the band budget, not by store size. Band workers default to all cores (`--cpus`): threads for
-in-memory or zarr-backed readers, processes for lazy h5py-backed ones, and a read-ahead pipeline
-when a lazy reader feeds an Icechunk session.
+set by the band budget, not by store size. A band is a whole number of write units (the chunk, or
+the shard when sharded) sized so one worker's working set stays within 512 MiB; there are as many
+bands as that needs and never fewer than there are workers. Every command streams this way,
+including CSC output and `add-expr` (a transpose through per-band temp files under the output),
+`sort` (per-group temp files), and 10x input, whose matrix is already cells-by-genes CSR on disk.
+
+Band workers default to all cores (`--cpus`): threads for in-memory or zarr-backed readers,
+processes for lazy h5py-backed ones, and a read-ahead pipeline in which worker processes read and
+this process writes when a lazy reader feeds an Icechunk session, a transpose, or a sort. A warning
+is logged when the workers' combined budget would exceed the memory available, or when a single
+chunk is larger than the budget (no band can be smaller than one chunk).
 
 ## Atomic writes
 

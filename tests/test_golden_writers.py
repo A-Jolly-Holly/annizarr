@@ -19,8 +19,8 @@ from typing import Any
 import pytest
 
 import annizarr
-from _readable import assert_anndata_readable
 from annizarr.config import AppConfig, apply_cli_overrides
+from helpers import assert_anndata_readable
 
 GOLDEN_DIR = Path(__file__).parent / "golden"
 TARBALLS = sorted(GOLDEN_DIR.glob("*.tar.gz"))

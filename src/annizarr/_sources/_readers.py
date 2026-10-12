@@ -13,6 +13,7 @@ from annizarr.errors import ConversionError
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from pathlib import Path
     from typing import Literal
 
     import scipy.sparse as sp
@@ -24,6 +25,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "CSRFileReader",
     "CSRH5Reader",
     "CSRMemoryReader",
     "CSRZarrReader",
@@ -33,6 +35,8 @@ __all__ = [
     "DenseMemoryReader",
     "DenseZarrReader",
     "Reader",
+    "ScaledReader",
+    "TenxCSRReader",
     "as_reader",
 ]
 
@@ -131,6 +135,12 @@ class Reader(ABC):
     def nnz(self) -> int:
         return int(self.indptr[-1])
 
+    @property
+    def band_bytes_per_nnz(self) -> int:
+        # bytes this reader holds per nonzero while producing one flat band: the band itself
+        # unless a transform adds temporaries (see ScaledReader)
+        return self.dtype.itemsize + 4
+
     @abstractmethod
     def _row_bytes(self) -> int: ...
 
@@ -179,6 +189,12 @@ class Reader(ABC):
         if not data_parts:
             return np.empty(0, dtype=self.dtype), np.empty(0, dtype=np.int32)
         return np.concatenate(data_parts), np.concatenate(idx_parts)
+
+    def flat_data(self, s0: int, s1: int) -> NDArray[Any]:
+        return self.flat(s0, s1)[0]
+
+    def flat_indices(self, s0: int, s1: int) -> NDArray[np.int32]:
+        return self.flat(s0, s1)[1]
 
     def close(self) -> None:  # noqa: B027  # intentional default no-op; not every reader holds a handle
         pass
@@ -235,9 +251,13 @@ class _CSRReaderMixin(Reader):
         return self._fetch_csr_band(r0, r1)
 
     def flat(self, s0: int, s1: int) -> tuple[NDArray[Any], NDArray[np.int32]]:
-        data = self._flat_data()
-        indices = self._flat_indices()
-        return np.asarray(data[s0:s1]), np.asarray(indices[s0:s1], dtype=np.int32)
+        return self.flat_data(s0, s1), self.flat_indices(s0, s1)
+
+    def flat_data(self, s0: int, s1: int) -> NDArray[Any]:
+        return np.asarray(self._flat_data()[s0:s1])
+
+    def flat_indices(self, s0: int, s1: int) -> NDArray[np.int32]:
+        return np.asarray(self._flat_indices()[s0:s1], dtype=np.int32)
 
 
 class DenseMemoryReader(_DenseReaderMixin):
@@ -429,7 +449,153 @@ class CSRH5Reader(_CSRReaderMixin):
             self._dataset_obj = None
 
     def __getstate__(self) -> dict[str, Any]:
-        return _clear_h5_state(self.__dict__.copy())
+        # a worker's flat reads never need indptr; pickling it per job would copy 8 bytes per row
+        state = _clear_h5_state(self.__dict__.copy())
+        state["_indptr_cache"] = None
+        return state
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        self.__dict__.update(state)
+
+
+class TenxCSRReader(_CSRReaderMixin):
+    # a 10x h5 matrix group read as cells-by-genes CSR (its indptr runs over barcodes), with an
+    # optional feature mask applied band by band: kept features are renumbered densely and
+    # int32 counts widen to float32 like the eager loader's
+    def __init__(self, path: str, group: str, *, n_obs: int, n_features: int, keep: Any = None) -> None:
+        super().__init__()
+        self._path = path
+        self._group_name = group
+        self._file: Any = None
+        self._group: Any = None
+        self._n_obs = n_obs
+        self._keep = None if keep is None else np.asarray(keep, dtype=bool)
+        if self._keep is None:
+            self._n_vars = n_features
+            self._remap = None
+        else:
+            self._n_vars = int(self._keep.sum())
+            self._remap = np.cumsum(self._keep, dtype=np.int32) - 1
+        self._dtype_val: np.dtype[Any] | None = None
+
+    def _node(self) -> Any:
+        if self._group is None:
+            import h5py
+
+            self._file = h5py.File(self._path, "r")
+            self._group = self._file[self._group_name]
+        return self._group
+
+    @property
+    def shape(self) -> tuple[int, int]:
+        return (self._n_obs, self._n_vars)
+
+    @property
+    def dtype(self) -> np.dtype[Any]:
+        if self._dtype_val is None:
+            on_disk = self._node()["data"].dtype
+            self._dtype_val = np.dtype(np.float32) if on_disk == np.dtype(np.int32) else np.dtype(on_disk)
+        return self._dtype_val
+
+    @property
+    def lazy(self) -> bool:
+        return True
+
+    @property
+    def thread_safe(self) -> bool:
+        return False  # h5py is not thread-safe
+
+    @property
+    def grain(self) -> int | None:
+        if self._keep is not None:
+            return None  # source chunks do not map onto masked flat positions
+        chunks = self._node()["data"].chunks
+        return int(chunks[0]) if chunks else None
+
+    def _source_indptr(self) -> NDArray[np.int64]:
+        return np.asarray(self._node()["indptr"][:], dtype=np.int64)
+
+    def _compute_indptr(self) -> NDArray[np.int64]:
+        src = self._source_indptr()
+        if self._keep is None:
+            return src
+        # one pass over indices counts the kept features per cell
+        kept = np.zeros(self._n_obs, dtype=np.int64)
+        max_nnz = min(_layout.BATCH_BYTES, _layout.PIPELINE_BATCH_BYTES) // _layout.COUNT_BYTES_PER_NNZ
+        for b0, b1 in _layout.major_bands(src, max_nnz=max_nnz, cpus=1):
+            idx = np.asarray(self._node()["indices"][int(src[b0]) : int(src[b1])])
+            rows = np.repeat(np.arange(b0, b1), np.diff(src[b0 : b1 + 1]))
+            kept[b0:b1] = np.bincount(rows[self._keep[idx]] - b0, minlength=b1 - b0)
+        return np.concatenate([[0], np.cumsum(kept)]).astype(np.int64)
+
+    def _read_rows(self, r0: int, r1: int) -> tuple[NDArray[Any], NDArray[np.int32], NDArray[np.int64]]:
+        # kept entries of source rows [r0, r1) with their local indptr
+        src = self._source_indptr() if self._keep is not None else None
+        node = self._node()
+        if src is None:
+            indptr = self.indptr
+            s0, s1 = int(indptr[r0]), int(indptr[r1])
+            data = np.asarray(node["data"][s0:s1])
+            idx = np.asarray(node["indices"][s0:s1], dtype=np.int32)
+            return data.astype(self.dtype, copy=False), idx, (indptr[r0 : r1 + 1] - s0).astype(np.int64)
+        s0, s1 = int(src[r0]), int(src[r1])
+        idx = np.asarray(node["indices"][s0:s1])
+        mask = self._keep[idx]  # type: ignore[index]  # keep is set on this branch
+        data = np.asarray(node["data"][s0:s1])[mask].astype(self.dtype, copy=False)
+        rows = np.repeat(np.arange(r0, r1), np.diff(src[r0 : r1 + 1]))[mask]
+        local = np.concatenate([[0], np.cumsum(np.bincount(rows - r0, minlength=r1 - r0))]).astype(np.int64)
+        remap = self._remap
+        assert remap is not None
+        return data, remap[idx[mask]], local
+
+    def _fetch_csr_band(self, r0: int, r1: int) -> sp.csr_matrix:
+        import scipy.sparse as sp
+
+        data, idx, local = self._read_rows(r0, r1)
+        return sp.csr_matrix((data, idx, local), shape=(r1 - r0, self._n_vars))
+
+    def flat(self, s0: int, s1: int) -> tuple[NDArray[Any], NDArray[np.int32]]:
+        if self._keep is None:
+            node = self._node()
+            data = np.asarray(node["data"][s0:s1]).astype(self.dtype, copy=False)
+            return data, np.asarray(node["indices"][s0:s1], dtype=np.int32)
+        if s1 <= s0:
+            return np.empty(0, dtype=self.dtype), np.empty(0, dtype=np.int32)
+        # masked flat positions are output positions: find the rows that cover them
+        indptr = self.indptr
+        r0 = max(int(np.searchsorted(indptr, s0, side="right")) - 1, 0)
+        r1 = min(max(int(np.searchsorted(indptr, s1, side="left")), r0 + 1), self._n_obs)
+        data, idx, _ = self._read_rows(r0, r1)
+        lo = s0 - int(indptr[r0])
+        return data[lo : lo + (s1 - s0)], idx[lo : lo + (s1 - s0)]
+
+    def flat_data(self, s0: int, s1: int) -> NDArray[Any]:
+        return self.flat(s0, s1)[0]
+
+    def flat_indices(self, s0: int, s1: int) -> NDArray[np.int32]:
+        return self.flat(s0, s1)[1]
+
+    def _flat_data(self) -> Any:
+        return self._node()["data"]
+
+    def _flat_indices(self) -> Any:
+        return self._node()["indices"]
+
+    def close(self) -> None:
+        if self._file is not None:
+            self._file.close()
+            self._file = None
+            self._group = None
+
+    def __getstate__(self) -> dict[str, Any]:
+        # a masked reader's workers need indptr to place flat reads, so it travels; without a
+        # mask the flat reads never touch it
+        state = self.__dict__.copy()
+        state["_file"] = None
+        state["_group"] = None
+        if self._keep is None:
+            state["_indptr_cache"] = None
+        return state
 
     def __setstate__(self, state: dict[str, Any]) -> None:
         self.__dict__.update(state)
@@ -537,15 +703,27 @@ class _SwappedCSRView(_CSRReaderMixin):
     # a raw CSC group's own (data, indices, indptr) reinterpreted as CSR over the transposed
     # shape (scipy's own `.T` trick, applied lazily): feeds a CSC source into
     # write_transposed_sparse without ever densifying or copying it. Internal to as_reader's
-    # CSC normalisation; never part of the public reader surface.
+    # CSC normalisation; never part of the public reader surface. An h5py group is held by
+    # file path and reopened per process, since h5py objects cannot be pickled.
     def __init__(self, group: Any, true_shape: tuple[int, int], dtype: np.dtype[Any]) -> None:
         import zarr
 
         super().__init__()
-        self._group = group
         self._shape_val = (true_shape[1], true_shape[0])
         self._dtype_val = dtype
         self._thread_safe = isinstance(group, zarr.Group)
+        self._group: Any = group if self._thread_safe else None
+        self._path = None if self._thread_safe else group.file.filename
+        self._group_name = None if self._thread_safe else group.name
+        self._file: Any = None
+
+    def _node(self) -> Any:
+        if self._group is None:
+            import h5py
+
+            self._file = h5py.File(self._path, "r")
+            self._group = self._file[self._group_name]
+        return self._group
 
     @property
     def shape(self) -> tuple[int, int]:
@@ -563,24 +741,47 @@ class _SwappedCSRView(_CSRReaderMixin):
     def thread_safe(self) -> bool:
         return self._thread_safe
 
+    @property
+    def grain(self) -> int | None:
+        chunks = self._node()["data"].chunks
+        return int(chunks[0]) if chunks else None
+
     def _compute_indptr(self) -> NDArray[np.int64]:
-        return np.asarray(self._group["indptr"][:], dtype=np.int64)
+        return np.asarray(self._node()["indptr"][:], dtype=np.int64)
 
     def _fetch_csr_band(self, r0: int, r1: int) -> sp.csr_matrix:
         import scipy.sparse as sp
 
         indptr = self.indptr
         s0, s1 = int(indptr[r0]), int(indptr[r1])
-        data = np.asarray(self._group["data"][s0:s1])
-        indices = np.asarray(self._group["indices"][s0:s1])
+        node = self._node()
+        data = np.asarray(node["data"][s0:s1])
+        indices = np.asarray(node["indices"][s0:s1])
         sub_indptr = (indptr[r0 : r1 + 1] - s0).astype(np.int64)
         return sp.csr_matrix((data, indices, sub_indptr), shape=(r1 - r0, self._shape_val[1]))
 
     def _flat_data(self) -> Any:
-        return self._group["data"]
+        return self._node()["data"]
 
     def _flat_indices(self) -> Any:
-        return self._group["indices"]
+        return self._node()["indices"]
+
+    def close(self) -> None:
+        if self._file is not None:
+            self._file.close()
+            self._file = None
+            self._group = None
+
+    def __getstate__(self) -> dict[str, Any]:
+        state = self.__dict__.copy()
+        if not self._thread_safe:
+            state["_group"] = None
+            state["_file"] = None
+            state["_indptr_cache"] = None
+        return state
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        self.__dict__.update(state)
 
 
 class ConcatReader(Reader):
@@ -651,23 +852,193 @@ class ConcatReader(Reader):
             return parts[0]
         return sp.vstack(parts, format="csr")
 
-    def flat(self, s0: int, s1: int) -> tuple[NDArray[Any], NDArray[np.int32]]:
-        data_buf = np.empty(s1 - s0, dtype=self._dtype_val)
-        idx_buf = np.empty(s1 - s0, dtype=np.int32)
+    def _flat_parts(self, s0: int, s1: int) -> list[tuple[int, int, Reader, int, int]]:
+        # (offset into the result, length, reader, its local s0, its local s1) for the overlapping readers
+        parts = []
         nnz_offset = 0
         for reader in self._readers:
             off_lo, off_hi = nnz_offset, nnz_offset + reader.nnz
             lo, hi = max(s0, off_lo), min(s1, off_hi)
             if lo < hi:
-                d, idx = reader.flat(lo - off_lo, hi - off_lo)
-                data_buf[lo - s0 : hi - s0] = d
-                idx_buf[lo - s0 : hi - s0] = idx
+                parts.append((lo - s0, hi - lo, reader, lo - off_lo, hi - off_lo))
             nnz_offset = off_hi
+        return parts
+
+    def flat(self, s0: int, s1: int) -> tuple[NDArray[Any], NDArray[np.int32]]:
+        parts = self._flat_parts(s0, s1)
+        if len(parts) == 1:  # the common case needs no second buffer
+            _, _, reader, lo, hi = parts[0]
+            return reader.flat(lo, hi)
+        data_buf = np.empty(s1 - s0, dtype=self._dtype_val)
+        idx_buf = np.empty(s1 - s0, dtype=np.int32)
+        for at, n, reader, lo, hi in parts:
+            data_buf[at : at + n], idx_buf[at : at + n] = reader.flat(lo, hi)
         return data_buf, idx_buf
+
+    def flat_indices(self, s0: int, s1: int) -> NDArray[np.int32]:
+        parts = self._flat_parts(s0, s1)
+        if len(parts) == 1:
+            _, _, reader, lo, hi = parts[0]
+            return reader.flat_indices(lo, hi)
+        idx_buf = np.empty(s1 - s0, dtype=np.int32)
+        for at, n, reader, lo, hi in parts:
+            idx_buf[at : at + n] = reader.flat_indices(lo, hi)
+        return idx_buf
 
     def close(self) -> None:
         for r in self._readers:
             r.close()
+
+
+class _FileSlice:
+    # 1-D array stored raw in a plain file: slicing reads just that range, no memmap pages
+    __slots__ = ("_dtype", "_path")
+
+    def __init__(self, path: Path, dtype: np.dtype[Any]) -> None:
+        self._path = path
+        self._dtype = dtype
+
+    def __getitem__(self, item: slice) -> NDArray[Any]:
+        s0, s1 = item.start or 0, item.stop
+        count = max(0, s1 - s0)
+        if count == 0:
+            return np.empty(0, dtype=self._dtype)
+        return np.fromfile(self._path, dtype=self._dtype, count=count, offset=s0 * self._dtype.itemsize)
+
+
+class CSRFileReader(_CSRReaderMixin):
+    # CSR rows whose data and indices sit raw in two plain files (sort's per-group buckets)
+    def __init__(
+        self,
+        data_path: Path,
+        indices_path: Path,
+        indptr: NDArray[np.int64],
+        shape: tuple[int, int],
+        dtype: np.dtype[Any],
+    ) -> None:
+        super().__init__()
+        self._data = _FileSlice(data_path, np.dtype(dtype))
+        self._indices = _FileSlice(indices_path, np.dtype(np.int32))
+        self._indptr_val = np.asarray(indptr, dtype=np.int64)
+        self._shape_val = shape
+        self._dtype_val = np.dtype(dtype)
+
+    @property
+    def shape(self) -> tuple[int, int]:
+        return self._shape_val
+
+    @property
+    def dtype(self) -> np.dtype[Any]:
+        return self._dtype_val
+
+    @property
+    def lazy(self) -> bool:
+        return True
+
+    @property
+    def thread_safe(self) -> bool:
+        return True  # every read opens its own handle
+
+    def _compute_indptr(self) -> NDArray[np.int64]:
+        return self._indptr_val
+
+    def _fetch_csr_band(self, r0: int, r1: int) -> sp.csr_matrix:
+        import scipy.sparse as sp
+
+        indptr = self.indptr
+        s0, s1 = int(indptr[r0]), int(indptr[r1])
+        sub_indptr = (indptr[r0 : r1 + 1] - s0).astype(np.int64)
+        return sp.csr_matrix((self._data[s0:s1], self._indices[s0:s1], sub_indptr), shape=(r1 - r0, self._shape_val[1]))
+
+    def _flat_data(self) -> Any:
+        return self._data
+
+    def _flat_indices(self) -> Any:
+        return self._indices
+
+
+class ScaledReader(Reader):
+    """A CSR-like reader whose values are log-normalised per row: ``log1p(x * factor[row])`` as float32.
+
+    Wraps any reader and applies the transform band by band, so every writer inherits its
+    memory bound and parallelism; ``factors`` come from :func:`annizarr.ops._expr.lognorm_factors`.
+    """
+
+    def __init__(self, inner: Reader, factors: NDArray[np.float64]) -> None:
+        super().__init__()
+        self._inner = inner
+        self._factors = np.asarray(factors, dtype=np.float64)
+        self.cpus = inner.cpus
+
+    @property
+    def shape(self) -> tuple[int, int]:
+        return self._inner.shape
+
+    @property
+    def dtype(self) -> np.dtype[Any]:
+        return np.dtype(np.float32)
+
+    @property
+    def lazy(self) -> bool:
+        return self._inner.lazy
+
+    @property
+    def thread_safe(self) -> bool:
+        return self._inner.thread_safe
+
+    @property
+    def grain(self) -> int | None:
+        return self._inner.grain
+
+    def _compute_indptr(self) -> NDArray[np.int64]:
+        return self._inner.indptr
+
+    @property
+    def band_bytes_per_nnz(self) -> int:
+        return int(_layout.LOGNORM_BYTES_PER_NNZ)
+
+    def _row_bytes(self) -> int:
+        return max(1, self.nnz // max(1, self.shape[0])) * _layout.LOGNORM_BYTES_PER_NNZ
+
+    def _scale(self, data: NDArray[Any], per_row_counts: NDArray[Any], r0: int, r1: int) -> NDArray[np.float32]:
+        # in place on one float64 copy: see _layout.LOGNORM_BYTES_PER_NNZ
+        vals = data.astype(np.float64)
+        vals *= np.repeat(self._factors[r0:r1], per_row_counts)
+        np.log1p(vals, out=vals)
+        return vals.astype(np.float32)
+
+    def flat(self, s0: int, s1: int) -> tuple[NDArray[Any], NDArray[np.int32]]:
+        data, indices = self._inner.flat(s0, s1)
+        return self._scale_flat(data, s0, s1), indices
+
+    def flat_data(self, s0: int, s1: int) -> NDArray[Any]:
+        return self._scale_flat(self._inner.flat_data(s0, s1), s0, s1)
+
+    def flat_indices(self, s0: int, s1: int) -> NDArray[np.int32]:
+        return self._inner.flat_indices(s0, s1)
+
+    def _scale_flat(self, data: NDArray[Any], s0: int, s1: int) -> NDArray[np.float32]:
+        if s1 <= s0:
+            return np.empty(0, dtype=np.float32)
+        indptr = self.indptr
+        r0 = max(int(np.searchsorted(indptr, s0, side="right")) - 1, 0)
+        r1 = int(np.searchsorted(indptr, s1, side="left"))
+        starts = np.clip(indptr[r0:r1], s0, s1)
+        ends = np.clip(indptr[r0 + 1 : r1 + 1], s0, s1)
+        return self._scale(data, ends - starts, r0, r1)
+
+    def csr_rows(self, r0: int, r1: int) -> sp.csr_matrix:
+        import scipy.sparse as sp
+
+        rows = self._inner.csr_rows(r0, r1)
+        vals = self._scale(np.asarray(rows.data), np.diff(rows.indptr), r0, r1)
+        return sp.csr_matrix((vals, rows.indices, rows.indptr), shape=rows.shape)
+
+    def dense_band(self, r0: int, r1: int) -> DenseBand:
+        return _CSRBand(self.csr_rows(r0, r1))
+
+    def close(self) -> None:
+        self._inner.close()
 
 
 def _is_anndata_sparse_dataset(matrix: Any) -> bool:
@@ -710,6 +1081,9 @@ def _reader_for(matrix: Any, cfg: AppConfig, tmp_dir: str | None) -> Reader:
     import numpy as np
     import scipy.sparse as sp
     import zarr
+
+    if isinstance(matrix, Reader):
+        return matrix
 
     if isinstance(matrix, np.ma.MaskedArray):
         raise ConversionError(f"adata.X must be CSR, CSC, or a 2-D dense array. Got: {type(matrix).__name__} (masked)")

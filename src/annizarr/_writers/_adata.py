@@ -27,7 +27,8 @@ def named_layers(adata: ad.AnnData) -> dict[str, Any]:
     return {name: data for name, data in adata.layers.items() if name is not None}
 
 
-def write_adata(adata: ad.AnnData, store: zarr.Group, cfg: AppConfig) -> None:
+def write_adata(adata: ad.AnnData, store: zarr.Group, cfg: AppConfig, *, x: Any = None) -> None:
+    # x: the matrix to write as X when it is not adata.X (a source's own reader)
     set_anndata_root_attrs(store)
 
     with autoshard_setting(cfg.chunks.auto_shard), stage("Writing metadata (obs/var/uns/obsm/varm/obsp/varp)"):
@@ -40,7 +41,7 @@ def write_adata(adata: ad.AnnData, store: zarr.Group, cfg: AppConfig) -> None:
         write_elem(store, "varp", dict(adata.varp))
 
     tmp_dir = _local_tmp_dir(store)
-    x_reader = as_reader(adata.X, cfg=cfg, tmp_dir=tmp_dir)
+    x_reader = as_reader(adata.X if x is None else x, cfg=cfg, tmp_dir=tmp_dir)
     try:
         with stage(f"Writing X (shape={x_reader.shape}, {cfg.io.layout})"):
             write_matrix(store, "X", x_reader, cfg)

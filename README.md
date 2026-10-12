@@ -3,7 +3,7 @@
 [![CI](https://github.com/A-Jolly-Holly/annizarr/actions/workflows/ci.yml/badge.svg)](https://github.com/A-Jolly-Holly/annizarr/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/annizarr)](https://pypi.org/project/annizarr/)
 
-Convert to, append, sort anndata zarr storages efficiently with parallel and lazy operations for all commands and api usage. Also, enable versioned anndata storage with Icechunk ease of use.
+Convert to, append, sort anndata zarr storages efficiently with parallel and out of memory operations for all commands and api usage. Also, enable versioned anndata storage with Icechunk ease of use.
 
 ## Install
 

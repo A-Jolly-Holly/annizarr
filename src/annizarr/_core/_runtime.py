@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import functools
 import logging
 import os
+import sys
 import threading
 import time
 from contextlib import contextmanager
@@ -31,6 +33,35 @@ def configure_runtime(cpus: int) -> None:
     # both zarr knobs: async.concurrency only dispatches fetches, max_workers runs decompression.
     workers = max(cpus, os.cpu_count() or 1)
     zarr.config.set({"async.concurrency": 64, "threading.max_workers": workers})
+    check_worker_memory(cpus)
+
+
+def available_memory() -> int | None:
+    # Linux reports what it can hand out without swapping; elsewhere three quarters of physical RAM
+    try:
+        if sys.platform.startswith("linux"):
+            with open("/proc/meminfo") as f:
+                for line in f:
+                    if line.startswith("MemAvailable:"):
+                        return int(line.split()[1]) * 1024
+        return os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE") * 3 // 4
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+def check_worker_memory(cpus: int) -> None:
+    from annizarr._core import _layout
+
+    available = available_memory()
+    if available is None:
+        return
+    # a band worker holds its import baseline plus one band working set; the parent adds its own
+    worker_peak = _layout.WORKER_BASELINE_BYTES + _layout.BATCH_BYTES
+    if cpus * worker_peak > 0.8 * available:
+        logger.warning(
+            f"{cpus} band workers at up to {worker_peak / 1024**2:.0f}MB each may exceed the "
+            f"{available / 1024**3:.1f}GB of memory available; pass a lower --cpus to leave headroom."
+        )
 
 
 def _init_worker() -> None:
@@ -76,45 +107,94 @@ def pipeline_parallel(
     consume: Callable[[Any], None],
     jobs: Sequence[tuple[object, ...]],
     cpus: int,
+    *,
+    mode: Literal["threads", "processes"] = "processes",
+    ordered: bool = False,
 ) -> None:
-    # processes read ahead, parent threads write; the semaphore caps payloads read but not yet
-    # written at 2*cpus so memory stays bounded whichever stage is slower
+    # workers read ahead, this process writes; the semaphore caps payloads read but not yet
+    # written so memory stays bounded whichever stage is slower: 2*cpus, or fewer once that many
+    # payloads would exceed the band budget (this process is then the bottleneck anyway).
+    # ordered=True consumes in job order on one thread (the reorder buffer is bounded by the same
+    # permits); processes for h5py readers, threads for thread-safe ones (no pickling, and
+    # Icechunk sessions work)
+    from annizarr._core import _layout
+
     if not jobs:
         return
 
-    inflight = threading.Semaphore(2 * cpus)
+    permits = max(2, min(2 * cpus, _layout.BATCH_BYTES // _layout.PIPELINE_BATCH_BYTES))
+    inflight = threading.Semaphore(permits)
     lock = threading.Lock()
+    ready_cv = threading.Condition(lock)
+    ready: dict[int, Any] = {}
     errors: list[BaseException] = []
 
-    with _executor("processes", cpus) as readers, _executor("threads", cpus) as writers:
+    def fail(exc: BaseException) -> None:
+        with lock:
+            errors.append(exc)
+            ready_cv.notify_all()
 
-        def do_write(payload: Any) -> None:
+    def release_ready() -> None:
+        # with the lock held: give back the permits of payloads nobody will consume now
+        for _ in ready:
+            inflight.release()
+        ready.clear()
+
+    def do_write(payload: Any) -> None:
+        try:
+            consume(payload)
+        except BaseException as exc:
+            fail(exc)
+        finally:
+            inflight.release()
+
+    def write_in_order() -> None:
+        for idx in range(len(jobs)):
+            with ready_cv:
+                while idx not in ready and not errors:
+                    ready_cv.wait()
+                if errors:
+                    release_ready()
+                    return
+                payload = ready.pop(idx)
             try:
                 consume(payload)
             except BaseException as exc:
                 with lock:
                     errors.append(exc)
-            finally:
-                inflight.release()
-
-        def on_read(fut: Any) -> None:
-            try:
-                payload = fut.result()
-            except BaseException as exc:
-                with lock:
-                    errors.append(exc)
+                    release_ready()
                 inflight.release()
                 return
-            writers.submit(do_write, payload)
+            inflight.release()
 
-        for job in jobs:
+    def on_read(idx: int, fut: Any) -> None:
+        try:
+            payload = fut.result()
+        except BaseException as exc:
+            fail(exc)
+            inflight.release()
+            return
+        if not ordered:
+            writers.submit(do_write, payload)
+            return
+        with ready_cv:
+            if errors:
+                inflight.release()
+                return
+            ready[idx] = payload
+            ready_cv.notify_all()
+
+    with _executor(mode, cpus) as readers, _executor("threads", 1 if ordered else cpus) as writers:
+        if ordered:
+            writers.submit(write_in_order)
+        for idx, job in enumerate(jobs):
             inflight.acquire()
             if errors:
                 inflight.release()
                 break
-            readers.submit(produce, *job).add_done_callback(on_read)
+            readers.submit(produce, *job).add_done_callback(functools.partial(on_read, idx))
 
-        for _ in range(2 * cpus):  # drain: block until every checked-out permit is back
+        for _ in range(permits):  # drain: block until every checked-out permit is back
             inflight.acquire()
 
     if errors:
@@ -173,7 +253,8 @@ class ArrayTarget:
 
         from annizarr._core._zarr import get_array
 
-        group = zarr.open_group(store=LocalStore(self.root), mode="r+")
+        # consolidated metadata, when present, predates arrays this op just created
+        group = zarr.open_group(store=LocalStore(self.root), mode="r+", use_consolidated=False)
         return get_array(group, self.path)
 
 

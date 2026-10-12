@@ -127,8 +127,8 @@ def concat(
                         f"got {list(a.obs.columns)}."
                     )
 
-        for a in adatas:
-            require_matrix(a)
+        for s_ in sources:
+            require_matrix(s_.adata, x=s_.x)
 
         n_obs_each = [a.n_obs for a in adatas]
         n_obs_total = sum(n_obs_each)
@@ -156,7 +156,7 @@ def concat(
         try:
             try:
                 tmp_dir = _local_tmp_dir(out.root)
-                readers.extend(as_reader(a.X, cfg=cfg, tmp_dir=tmp_dir) for a in adatas)
+                readers.extend(as_reader(s_.x, cfg=cfg, tmp_dir=tmp_dir) for s_ in sources)
                 set_anndata_root_attrs(out.root)
 
                 with autoshard_setting(cfg.chunks.auto_shard):

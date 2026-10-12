@@ -40,9 +40,9 @@ class IOConfig:
     layout
         On-disk layout for X (and layers): ``"csr"``, ``"csc"``, or ``"dense"``.
     lazy
-        Load h5ad input in lazy (HDF5-streamed) mode instead of eagerly. ``True`` (the
-        default) streams the input band by band; ``False`` loads it whole into memory
-        first. Ignored for in-memory/10x input (always eager).
+        Load h5ad and 10x input in lazy (HDF5-streamed) mode instead of eagerly. ``True``
+        (the default) streams the input band by band; ``False`` loads it whole into memory
+        first. Ignored for in-memory input.
     backend
         ``"zarr"`` writes a plain on-disk store; ``"icechunk"`` writes through a
         transactional, versioned Icechunk repository (one commit per op). Icechunk

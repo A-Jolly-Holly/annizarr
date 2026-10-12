@@ -5,8 +5,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 import zarr
-from _ic_helpers import snapshot_tree
 
+from _ic_helpers import snapshot_tree
 from annizarr.errors import RepoError
 from annizarr.ic import Repo
 from annizarr.ic._copy import copy_group

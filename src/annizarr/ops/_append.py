@@ -22,12 +22,13 @@ from annizarr._core._zarr import (
 )
 from annizarr._storage import open_input_group, open_store_rw, store_name
 from annizarr.errors import ConversionError
-from annizarr.ops._expr import lognorm_band, target_sum_attr
+from annizarr.ops._expr import target_sum_attr
 from annizarr.ops._result import AppendPlan, OpResult
 
 if TYPE_CHECKING:
     import pandas as pd
 
+    from annizarr._sources._readers import Reader
     from annizarr.typing import PathLike
 
 logger = logging.getLogger(__name__)
@@ -361,12 +362,18 @@ def _count_duplicate_names(obs_t: zarr.Group, obs_s: zarr.Group, n_t: int) -> in
         is_repeat_sorted[1:] = sorted_idx[1:] == sorted_idx[:-1]
         repeats_earlier[order] = is_repeat_sorted
 
+    import pandas as pd
+
+    # pandas hashes the names; numpy's isin sorts object arrays and was 70x slower at 300k rows
     t_arr = _index_values(obs_t)
     chunk0 = t_arr.chunks[0]
     step = max(chunk0, (_INDEX_SCAN_ROWS // max(1, chunk0)) * chunk0)
+    incoming = pd.Index(idx_s)
     in_target = np.zeros(len(idx_s), dtype=bool)
     for i0 in range(0, n_t, step):
-        in_target |= np.isin(idx_s, np.asarray(t_arr[i0 : min(i0 + step, n_t)]))
+        in_target |= incoming.isin(np.asarray(t_arr[i0 : min(i0 + step, n_t)]))
+        if in_target.all():
+            break
     return int((in_target | repeats_earlier).sum())
 
 
@@ -399,14 +406,15 @@ def _extend_flat(dst_a: Any, src_a: Any, off: int, n_src: int, cpus: int) -> Non
     # after the seam, cuts land on dst's write-grid multiples (no read-modify-write).
     dst_a.resize((off + n_src,))
     grid0 = _layout.write_grid(dst_a)[0]
-    step = max(grid0, (_layout.BATCH_BYTES // max(1, grid0 * dst_a.dtype.itemsize)) * grid0)
-    cuts = [0]
-    seam = (-off) % grid0
-    if 0 < seam < n_src:
-        cuts.append(seam)
-    while cuts[-1] < n_src:
-        cuts.append(min(n_src, cuts[-1] + step))
-    jobs = [(src_a, dst_a, cuts[i], cuts[i + 1], off) for i in range(len(cuts) - 1)]
+    seam = min((-off) % grid0, n_src)  # the part that lands in dst's existing partial chunk, maybe all of it
+    cuts: list[tuple[int, int]] = [(0, seam)] if seam else []
+    bytes_per_item = _layout.copy_bytes_per_item(dst_a.dtype.itemsize)
+    cuts += [
+        (seam + s0, seam + s1)
+        for s0, s1 in _layout.plan_bands(n_src - seam, unit=grid0, bytes_per_item=bytes_per_item, cpus=cpus)
+    ]
+    assert cuts and cuts[0][0] == 0 and cuts[-1][1] == n_src, "the cuts must cover the whole append"
+    jobs = [(src_a, dst_a, s0, s1, off) for s0, s1 in cuts]
     run_parallel(_copy_shifted, jobs, cpus)
 
 
@@ -440,24 +448,36 @@ def _extendable_layers(layers: Any, keys: list[str], indptr_t: Any) -> tuple[lis
 def _extend_lognorm_layers(
     root: Any, x_s: Any, keys: list[str], indptr_t: Any, indptr_s: Any, n_new: int, n_vars: int, cfg: AppConfig
 ) -> None:
+    from annizarr._sources._readers import ScaledReader, as_reader
+    from annizarr.ops._expr import lognorm_factors
+
     nnz_t, nnz_s = int(indptr_t[-1]), int(indptr_s[-1])
-    row_nnz_s = np.diff(indptr_s)
-    n_s = len(row_nnz_s)
-    row_step = max(1_000, min(200_000, _layout.BATCH_BYTES // (max(1, nnz_s // max(1, n_s)) * 12)))
-    for k in keys:
-        g = root["layers"][k]
-        target_sum = target_sum_attr(g.attrs)  # eligibility already checked this is present
-        assert target_sum is not None
-        with stage(f"Extending layers/{k} ({n_s} cells, nnz={nnz_s})"):
-            _extend_flat(g["indices"], x_s["indices"], nnz_t, nnz_s, cfg.chunks.cpus)
-            data = g["data"]
-            data.resize((nnz_t + nnz_s,))
-            for b0 in range(0, n_s, row_step):
-                b1 = min(b0 + row_step, n_s)
-                s0, s1, vals = lognorm_band(x_s["data"], indptr_s, row_nnz_s, target_sum, b0, b1)
-                data[nnz_t + s0 : nnz_t + s1] = vals
-            _rewrite_indptr(g, indptr_t, indptr_s, n_new)
-            g.attrs["shape"] = [n_new, n_vars]
+    n_s = len(indptr_s) - 1
+    x_reader = as_reader(x_s, cfg=cfg)
+    try:
+        for k in keys:
+            g = root["layers"][k]
+            target_sum = target_sum_attr(g.attrs)  # eligibility already checked this is present
+            assert target_sum is not None
+            scaled = ScaledReader(x_reader, lognorm_factors(x_reader, target_sum))
+            with stage(f"Extending layers/{k} ({n_s} cells, nnz={nnz_s})"):
+                _extend_flat(g["indices"], x_s["indices"], nnz_t, nnz_s, cfg.chunks.cpus)
+                _extend_flat(g["data"], _FlatValues(scaled), nnz_t, nnz_s, cfg.chunks.cpus)
+                _rewrite_indptr(g, indptr_t, indptr_s, n_new)
+                g.attrs["shape"] = [n_new, n_vars]
+    finally:
+        x_reader.close()
+
+
+class _FlatValues:
+    # a reader's flat values as a sliceable source for _extend_flat
+    __slots__ = ("_reader",)
+
+    def __init__(self, reader: Reader) -> None:
+        self._reader = reader
+
+    def __getitem__(self, item: slice) -> Any:
+        return self._reader.flat_data(item.start or 0, item.stop)
 
 
 def _append_obs(obs_t: Any, obs_s: Any, n_t: int, n_new: int) -> None:

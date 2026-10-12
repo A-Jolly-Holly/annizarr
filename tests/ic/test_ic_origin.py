@@ -9,8 +9,8 @@ from __future__ import annotations
 import os
 
 import pytest
-from _ic_helpers import snapshot_tree
 
+from _ic_helpers import snapshot_tree
 from annizarr.errors import RepoError
 from annizarr.ic import Repo
 
