@@ -60,7 +60,7 @@ packages = ["src/annizarr"]
 
 [tool.ruff]
 line-length = 120
-src = ["src", "tests"]
+src = ["src", "tests", "tests/ic", "tests/ooc"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "TID", "RUF", "D"]
@@ -95,8 +95,12 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-m 'not slow' --cov=annizarr --cov-report=term-missing:skip-covered --cov-fail-under=85"
-markers = ["slow: large synthetic store, run with -m slow"]
+pythonpath = ["tests", "tests/ic", "tests/ooc"]  # `from helpers import ...` under importlib mode
+addopts = "--import-mode=importlib --strict-markers -m 'not slow' --cov=annizarr --cov-report=term-missing:skip-covered --cov-fail-under=85"
+xfail_strict = true
+markers = [
+  "slow: out-of-core memory ceilings on a large synthetic store (tests/ooc); not a regression test, excluded by default, select with -m slow",
+]
 filterwarnings = [
   # zarr v3 consolidated metadata isn't part of the spec yet — expected, exercised on purpose
   # by tests/test_ops.py::test_ops_on_consolidated_store and tests/test_storage.py.
