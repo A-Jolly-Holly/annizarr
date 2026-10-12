@@ -198,3 +198,18 @@ def format_table(rows: list[tuple[str, Measurement, int | None]]) -> str:
             f"{m.tree_peak_procs:>5} {c:>10}"
         )
     return "\n".join(out)
+
+
+def worker_import_baseline(_: int) -> int:
+    """Peak RSS in bytes of a fresh process after the imports a band worker makes.
+
+    Lives here, not in the test module: a pool worker imports the function's module by name, and
+    pytest's importlib mode registers test modules under names a worker cannot import.
+    """
+    import importlib
+    import resource
+
+    for module in ("numpy", "scipy.sparse", "pandas", "h5py", "zarr", "anndata"):
+        importlib.import_module(module)
+    peak = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+    return peak if sys.platform == "darwin" else peak * 1024
