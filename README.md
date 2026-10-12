@@ -7,15 +7,12 @@ Convert to, append, sort anndata zarr storages efficiently with parallel and out
 
 ## Install
 
-`annizarr` and the shorter `anz` are the same command. The `icechunk` extra adds versioned stores and
-remote (`s3://`, `gs://`) targets.
+the `icechunk` additional dependencies include gcs, s3 read/writing alongside icechunk usage.
 
 ```bash
 pip install annizarr
 pip install "annizarr[icechunk]"
 ```
-
-To work on the code instead, see [Development](#development).
 
 ## Quickstart usage
 
@@ -34,7 +31,8 @@ annizarr convert sample.h5ad -o repo.icechunk --ic -m "initial import"
 ### Zarr operations and edits
 
 `rechunk` rewrites one matrix with new chunking and streams everything else through unchanged.<br>
-`sort` physically orders rows by obs column(s) into a new store.<br> `append` adds cells to an existing zarr/ic store; it prompts before dropping obsm/obsp/layers (`--drop-derived` consents up front)<br>
+`sort` physically orders rows by obs column(s) into a new store.<br> 
+`append` adds cells to an existing zarr/ic store; it prompts before dropping obsm/obsp/layers (`--drop-derived` consents up front)<br>
 `add-expr` adds a log-normalized layer (`layers/gexp`) derived from X/. Csc by default for fast column reads
 
 ```bash
@@ -48,6 +46,34 @@ annizarr add-expr repo.icechunk --layout csr --branch dev -m "add lognorm layer"
 ```
 
 Icechunk history, branches, cherry-picks live in the Python API `annizarr.Repo` below
+
+
+## Python API for Icechunk usage
+
+The full Python API, including the config dataclasses and the ops functions, is in
+[docs/python-api.md](https://github.com/A-Jolly-Holly/annizarr/blob/main/docs/python-api.md).
+
+```python
+import annizarr as az
+
+repo = az.Repo("repo.icechunk")
+
+repo.branches()
+repo.log()
+repo.tree()
+
+root = repo.open_zarr("w")
+root.attrs["step"] = "lognorm"
+repo.commit("normalize")
+
+repo.checkout("experiment", create=True)  # switches this object only; nothing is persisted
+old = repo.open_zarr("r", snapshot_id=repo.log()[1].id)
+
+repo.copy("/work/store")  # clone with every branch and snapshot id intact, good for readonly cases
+```
+
+`OpResult(path, n_obs, n_vars, snapshot_id)` — `snapshot_id` is `None` for plain zarr,
+the committed Icechunk snapshot id otherwise.
 
 ## Configuration and zarr stores
 
@@ -77,33 +103,6 @@ attrs matching anndata 0.13's on-disk spec. X and layers may be dense, CSR or CS
 `convert`/`rechunk`/`sort` write to a sibling temp store, verify it opens, then rename it onto the
 target, so a killed run never leaves a partial store. On Icechunk every op is exactly one commit,
 and remote (`s3://`, `gs://`) outputs require it. More in [docs/stores.md](https://github.com/A-Jolly-Holly/annizarr/blob/main/docs/stores.md).
-
-## Python API for Icechunk usage
-
-The full Python API, including the config dataclasses and the ops functions, is in
-[docs/python-api.md](https://github.com/A-Jolly-Holly/annizarr/blob/main/docs/python-api.md).
-
-```python
-import annizarr as az
-
-repo = az.Repo("repo.icechunk")
-
-repo.branches()
-repo.log()
-repo.tree()
-
-root = repo.open_zarr("w")
-root.attrs["step"] = "lognorm"
-repo.commit("normalize")
-
-repo.checkout("experiment", create=True)  # switches this object only; nothing is persisted
-old = repo.open_zarr("r", snapshot_id=repo.log()[1].id)
-
-repo.copy("/work/store")  # clone with every branch and snapshot id intact, good for readonly cases
-```
-
-`OpResult(path, n_obs, n_vars, snapshot_id)` — `snapshot_id` is `None` for plain zarr,
-the committed Icechunk snapshot id otherwise.
 
 ## Development
 
