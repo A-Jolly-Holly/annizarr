@@ -17,7 +17,7 @@ zarr and the committed Icechunk snapshot id otherwise. `cfg` is an [`AppConfig`]
 | `az.sort(store, *, output, by, cfg=None, branch=None, message=None)` | Physically order rows by the obs columns in `by` into a new store. A lone `layers/gexp` is re-derived on the sorted output. |
 | `az.plan_append(store, *, cells)` | Metadata-only dry run of `append`: returns an `AppendPlan` saying what would be dropped or extended. |
 | `az.append(store, *, cells, drop_derived=False, extend_layers=False, cfg=None, branch=None, message=None)` | Append the cells of another converted store in place. Raises if it would drop obsm/obsp/layers unless `drop_derived=True`; `extend_layers=True` extends add-expr CSR layers instead of dropping them. |
-| `az.add_expr(store, *, layout="csc", layer="gexp", target_sum=1e4, overwrite=False, cfg=None, branch=None, message=None)` | Add a log-normalized layer derived from CSR X. Chunking comes from `cfg.chunks`. |
+| `az.add_expr(store, *, layout="csc", layer="gexp", target_sum=1e4, overwrite=False, cfg=None, branch=None, message=None)` | Add a log-normalized layer derived from CSR X, streamed through the same writer as X: chunking follows `cfg.chunks` the way X's does on `convert` (dense layers are `row_chunk` by `col_chunk` tiles). |
 
 `AppendPlan(n_new, drop_obsm, drop_obsp, drop_layers, extendable_layers, n_duplicate_names, notes)`
 is a frozen dataclass; `plan.drops(extend_layers=False)` lists the element paths that would go.
@@ -41,7 +41,7 @@ keyword arguments (`None` means unset) onto a config; the CLI uses it.
 | Field | Default | Meaning |
 |---|---|---|
 | `io.layout` | `"csr"` | On-disk layout of X and layers: `"csr"`, `"csc"`, or `"dense"`. |
-| `io.lazy` | `True` | Stream h5ad input band by band; `False` loads it whole first (faster for small files). |
+| `io.lazy` | `True` | Stream h5ad and 10x input band by band; `False` loads it whole first (faster for small files). |
 | `io.backend` | `"zarr"` | `"icechunk"` writes through a versioned repository, one commit per op. |
 | `io.overwrite` | `False` | Replace an existing output store. |
 | `io.consolidate_metadata` | `False` | Consolidate zarr metadata after writing (plain zarr only). |
