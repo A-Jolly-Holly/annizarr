@@ -16,8 +16,6 @@ ceiling, not a regression test. Run it explicitly: ``pytest -m slow --no-cov -s`
 
 from __future__ import annotations
 
-import resource
-import sys
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
@@ -27,7 +25,7 @@ import pytest
 import zarr
 from anndata.io import read_elem, sparse_dataset
 
-from _ooc import MB, Measurement, build_h5ad, format_table, run_measured
+from _ooc import MB, Measurement, build_h5ad, format_table, run_measured, worker_import_baseline
 from annizarr._core import _layout
 from annizarr._core._runtime import _init_worker
 from annizarr.config import ChunkConfig
@@ -42,19 +40,10 @@ H5_CHUNK = 1 << 20  # build_h5ad's data/indices chunk, the lazy reader's grain
 MARGIN = 1.15
 
 
-def _worker_baseline(_: int) -> int:
-    import importlib
-
-    for module in ("numpy", "scipy.sparse", "pandas", "h5py", "zarr", "anndata"):  # what a band worker imports
-        importlib.import_module(module)
-    peak = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
-    return peak if sys.platform == "darwin" else peak * 1024
-
-
 def _baselines(tiny_h5ad: Path, out: Path) -> tuple[int, int]:
     """(worker import baseline, parent baseline) in bytes, measured here rather than assumed."""
     with ProcessPoolExecutor(1, initializer=_init_worker) as ex:
-        worker = int(ex.submit(_worker_baseline, 0).result())
+        worker = int(ex.submit(worker_import_baseline, 0).result())
     parent = run_measured(["-q", "convert", str(tiny_h5ad), "-o", str(out), "--cpus", "1"]).self_peak_bytes
     return worker, parent
 
