@@ -8,6 +8,7 @@ on:
     branches: [main]
   push:
     branches: [main]
+  workflow_dispath:
 
 jobs:
   all:
@@ -26,7 +27,7 @@ jobs:
       - run: ruff format --check src tests docs
       - run: mypy --strict src/annizarr
       - run: pytest  # coverage gate is in pyproject.toml
-      - if: github.event_name == 'push'
+      - if: github.event_name != 'pull_request'
         run: pytest -m slow --no-cov  # a few minutes, out of core testing
 
   core:
