@@ -5,7 +5,7 @@ import os
 import time
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import anndata as ad
 
@@ -13,7 +13,7 @@ from annizarr._core._config import AppConfig, resolve_backend_cfg
 from annizarr._core._runtime import configure_runtime
 from annizarr._core._sorting import _write_sorted_lazy, maybe_sort_adata
 from annizarr._core._validation import require_matrix
-from annizarr._sources import close_lazy_if_needed, detect_format, load_10x_h5, load_h5ad, open_source
+from annizarr._sources import close_lazy_if_needed, detect_format, load_h5ad, open_source
 from annizarr._storage import check_output_target, open_output_store, store_name
 from annizarr._writers import write_adata
 from annizarr.errors import AnzError, ConversionError
@@ -36,7 +36,9 @@ def write_adata_to_store(
     allow_grouping: bool = False,
     branch: str | None = None,
     message: str | None = None,
+    x: Any = None,
 ) -> OpResult:
+    # x: the matrix written as X when it is not adata.X (a lazy 10x source's reader)
     cfg = resolve_backend_cfg(cfg)
     configure_runtime(cfg.chunks.cpus)
 
@@ -48,7 +50,7 @@ def write_adata_to_store(
     elif cfg.grouping.enabled:
         raise ConversionError("grouping (sort_by) is only supported by convert for now.")
 
-    require_matrix(adata)
+    require_matrix(adata, x=x)
     ad.settings.zarr_write_format = 3
 
     logger.info(
@@ -61,7 +63,7 @@ def write_adata_to_store(
         output_path, cfg, commit_message=commit_message, branch=branch, expected_shape=(adata.n_obs, adata.n_vars)
     )
     try:
-        write_adata(adata, out.root, cfg)
+        write_adata(adata, out.root, cfg, x=x)
         snapshot_id = out.finalize()
     except BaseException:
         out.abort()
@@ -122,18 +124,17 @@ def convert_10x_h5(
     branch: str | None = None,
     message: str | None = None,
 ) -> OpResult:
-    """Convert a 10x Cell Ranger .h5 to zarr; expects CSR from the 10x load."""
+    """Convert a 10x Cell Ranger .h5 to zarr, streaming its matrix unless ``cfg.io.lazy`` is off."""
     if cfg is None:
         cfg = AppConfig()
     check_output_target(output, cfg)
+    source = open_source(path, cfg, fmt="10x")
     try:
-        adata = load_10x_h5(path)
-    except AnzError:
-        raise
-    except Exception as e:
-        raise ConversionError(f"Failed to read 10x H5 file: {e}") from e
-
-    return write_adata_to_store(adata, output, cfg, allow_grouping=False, branch=branch, message=message)
+        return write_adata_to_store(
+            source.adata, output, cfg, allow_grouping=False, branch=branch, message=message, x=source.x
+        )
+    finally:
+        source.close()
 
 
 def convert(
@@ -212,6 +213,8 @@ def _convert_one(
     try:
         for w in source.warnings:
             logger.warning(w)
-        return write_adata_to_store(source.adata, output, cfg, allow_grouping=False, branch=branch, message=message)
+        return write_adata_to_store(
+            source.adata, output, cfg, allow_grouping=False, branch=branch, message=message, x=source.x
+        )
     finally:
         source.close()

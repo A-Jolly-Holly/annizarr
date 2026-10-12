@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import logging
-import shutil
-import tempfile
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -13,19 +11,22 @@ import pandas as pd
 import scipy.sparse as sp
 import zarr
 
-from annizarr._core._runtime import configure_runtime, stage
+from annizarr._core import _layout
+from annizarr._core._runtime import configure_runtime, run_parallel, stage
 from annizarr._core._validation import require_matrix
-from annizarr._core._zarr import get_array
-from annizarr._sources._readers import ConcatReader, CSRZarrReader, as_reader
+from annizarr._sources._readers import ConcatReader, CSRFileReader, as_reader
 from annizarr._storage import open_output_store
-from annizarr._writers._encoding import autoshard_setting, make_sparse_group, prepare_frame, set_array_attrs, write_elem
+from annizarr._writers._buckets import Buckets
+from annizarr._writers._encoding import autoshard_setting, prepare_frame, write_elem
 from annizarr._writers._matrix import write_matrix
 from annizarr.errors import ConversionError
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from typing import Literal
 
     from annizarr._core._config import AppConfig
+    from annizarr._sources._readers import Reader
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +121,36 @@ def _write_sorted_lazy(
     return snapshot_id
 
 
+def _bucket_batch(
+    reader: Reader,
+    s0: int,
+    s1: int,
+    local_indptr: np.ndarray,
+    groups: np.ndarray,
+    n_vars: int,
+    offsets: np.ndarray,
+    buckets: Buckets,
+    close: bool,
+) -> None:
+    # one contiguous row batch split into per-group runs, each run's rows in source order, written
+    # at the run's precomputed offset in its group's files
+    try:
+        data, indices = reader.flat(s0, s1)
+    finally:
+        if close:
+            reader.close()
+    batch = sp.csr_matrix((data, indices, local_indptr), shape=(len(groups), n_vars))
+    order = np.argsort(groups, kind="stable")
+    sorted_g = groups[order]
+    starts = np.flatnonzero(np.concatenate(([True], sorted_g[1:] != sorted_g[:-1])))
+    ends = np.concatenate((starts[1:], [sorted_g.size]))
+    for lo, hi in zip(starts, ends, strict=True):
+        sub = batch[order[lo:hi]]
+        if sub.nnz:
+            gi = int(sorted_g[lo])
+            buckets.write_at(gi, int(offsets[gi]), data=sub.data, indices=sub.indices.astype(np.int32, copy=False))
+
+
 def stream_sorted_store(
     x: Any,
     obs: pd.DataFrame,
@@ -136,8 +167,6 @@ def stream_sorted_store(
     branch: str | None = None,
     after_write: Callable[[zarr.Group], None] | None = None,
 ) -> str | None:
-    from annizarr._core import _layout
-
     configure_runtime(cfg.chunks.cpus)
 
     src_reader = as_reader(x, cfg=cfg)
@@ -157,7 +186,8 @@ def stream_sorted_store(
         group_of_source[rows] = gi
         group_rows.append(rows)
 
-    row_nnz = np.diff(src_reader.indptr).astype(np.int64)
+    indptr = src_reader.indptr
+    row_nnz = np.diff(indptr).astype(np.int64)
     n_rows_each = [int(r.size) for r in group_rows]
     indptr_each = [np.concatenate([[0], np.cumsum(row_nnz[r])]).astype(np.int64) for r in group_rows]
     nnz_each = [int(ip[-1]) for ip in indptr_each]
@@ -169,50 +199,40 @@ def stream_sorted_store(
     )
     t0 = time.perf_counter()
 
-    tmp_root = Path(tempfile.mkdtemp(prefix="annizarr_sort_", dir=str(output_path.parent)))
+    # workers split contiguous row batches by group and write each run at an offset known up front
+    # from the rows' groups and nonzeros, so rows within a group keep source order (== perm's)
+    # and nothing passes through this process
+    buckets = Buckets.create(
+        n_groups,
+        {"data": np.dtype(x_dtype), "indices": np.dtype(indices_dtype)},
+        dir=str(output_path.parent),
+        prefix="annizarr_sort_",
+        sizes=nnz_each,
+    )
     try:
-        tmp_store_root = zarr.open_group(str(tmp_root), mode="w")
-        temp_groups = []
-        for gi in range(n_groups):
-            tg = make_sparse_group(tmp_store_root, f"g{gi}", csr=True, shape=(n_rows_each[gi], n_vars))
-            tg.require_array("data", shape=(nnz_each[gi],), dtype=x_dtype, chunks="auto", overwrite=True)
-            tg.require_array("indices", shape=(nnz_each[gi],), dtype=indices_dtype, chunks="auto", overwrite=True)
-            ip = tg.require_array(
-                "indptr",
-                shape=(n_rows_each[gi] + 1,),
-                dtype=np.int64,
-                chunks=(n_rows_each[gi] + 1,),
-                overwrite=True,
+        batch_nnz = max(1, _layout.BATCH_BYTES // _layout.BUCKET_BYTES_PER_NNZ)
+        batches = _layout.major_bands(indptr, max_nnz=batch_nnz, cpus=cfg.chunks.cpus)
+        counts = np.stack(
+            [np.bincount(group_of_source[b0:b1], weights=row_nnz[b0:b1], minlength=n_groups) for b0, b1 in batches]
+        ).astype(np.int64)
+        offsets = np.cumsum(counts, axis=0) - counts
+        mode: Literal["threads", "processes"] = "threads" if src_reader.thread_safe else "processes"
+        jobs = [
+            (
+                src_reader,
+                int(indptr[b0]),
+                int(indptr[b1]),
+                indptr[b0 : b1 + 1] - indptr[b0],
+                group_of_source[b0:b1],
+                n_vars,
+                offsets[i],
+                buckets,
+                mode == "processes",
             )
-            for name in ("data", "indices", "indptr"):
-                set_array_attrs(get_array(tg, name))
-            ip[:] = indptr_each[gi]
-            temp_groups.append(tg)
-
-        # per-group cursors aren't write-grid aligned, but this pass is serial: a perf cost only.
-        nnz_total = int(row_nnz.sum())
-        bpm = max(1, nnz_total // max(1, n_obs)) * (np.dtype(x_dtype).itemsize + np.dtype(indices_dtype).itemsize)
-        batch_size = max(1_000, min(200_000, _layout.BATCH_BYTES // bpm))
-        cursors = [0] * n_groups  # nnz write cursor per group
-        with stage(f"Bucketing {n_obs} rows into {n_groups} groups (lazy, streamed)"):
-            for b0 in range(0, n_obs, batch_size):
-                b1 = min(b0 + batch_size, n_obs)
-                batch = src_reader.csr_rows(b0, b1)  # -> in-memory scipy CSR (one batch bounds RAM)
-                g_batch = group_of_source[b0:b1]
-                order = np.argsort(g_batch, kind="stable")
-                sorted_g = g_batch[order]
-                starts_b = np.flatnonzero(np.concatenate(([True], sorted_g[1:] != sorted_g[:-1])))
-                ends_b = np.concatenate((starts_b[1:], [sorted_g.size]))
-                for lo, hi in zip(starts_b, ends_b, strict=True):
-                    gi = int(sorted_g[lo])
-                    sub = batch[order[lo:hi]]  # stable ties keep source (== output) order
-                    m = sub.nnz
-                    if m == 0:
-                        continue
-                    c = cursors[gi]
-                    get_array(temp_groups[gi], "data")[c : c + m] = sub.data
-                    get_array(temp_groups[gi], "indices")[c : c + m] = sub.indices.astype(indices_dtype, copy=False)
-                    cursors[gi] = c + m
+            for i, (b0, b1) in enumerate(batches)
+        ]
+        with stage(f"Bucketing {n_obs} rows into {n_groups} groups ({len(batches)} batches)"):
+            run_parallel(_bucket_batch, jobs, cfg.chunks.cpus, mode=mode)
 
         out = open_output_store(
             output_path,
@@ -237,7 +257,18 @@ def stream_sorted_store(
                     write_elem(store, "obsp", {})  # empty (non-empty obsp is rejected by callers)
                     write_elem(store, "varp", dict(varp))
 
-                concat_reader = ConcatReader([CSRZarrReader(tg) for tg in temp_groups])
+                concat_reader = ConcatReader(
+                    [
+                        CSRFileReader(
+                            buckets.path(gi, "data"),
+                            buckets.path(gi, "indices"),
+                            indptr_each[gi],
+                            (n_rows_each[gi], n_vars),
+                            np.dtype(x_dtype),
+                        )
+                        for gi in range(n_groups)
+                    ]
+                )
                 with stage(f"Writing X (n_obs={n_obs}, n_vars={n_vars}, csr, concat {n_groups} groups)"):
                     write_matrix(store, "X", concat_reader, cfg)
                 if after_write is not None:
@@ -248,7 +279,7 @@ def stream_sorted_store(
             raise
     finally:
         src_reader.close()
-        shutil.rmtree(tmp_root, ignore_errors=True)
+        buckets.remove()
 
     logger.info(f"Done in {time.perf_counter() - t0:.1f}s")
     logger.info(

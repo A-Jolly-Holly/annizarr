@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Any
 import zarr
 
 from annizarr._core._config import AppConfig, resolve_backend_cfg
-from annizarr._core._layout import dense_shards, write_grid
+from annizarr._core._layout import check_write_unit, dense_shards, write_grid
 from annizarr._core._runtime import configure_runtime, run_parallel, stage
 from annizarr._core._zarr import get_group, has_element, shape_attr
 from annizarr._storage import check_output_target, open_input_group, open_output_store, store_name
@@ -163,15 +163,14 @@ def _copy_matrix(node: Any, dst_root: Any, key: str, cfg: AppConfig, *, rechunk:
             overwrite=True,
         )
         out.attrs.update(dict(node.attrs))
+        check_write_unit(out)
         block_row, block_col = write_grid(out)
         jobs = [
             (node, out, r0, min(r0 + block_row, n_rows), c0, min(c0 + block_col, n_cols))
             for r0 in range(0, n_rows, block_row)
             for c0 in range(0, n_cols, block_col)
         ]
-        block_bytes = block_row * block_col * node.dtype.itemsize  # cap in-flight RSS to ~2 GiB
-        workers = max(1, min(cfg.chunks.cpus, (2 << 30) // max(1, block_bytes)))
-        run_parallel(_copy_block, jobs, workers)
+        run_parallel(_copy_block, jobs, cfg.chunks.cpus)
         return
 
     enc = node.attrs.get("encoding-type")
@@ -203,9 +202,13 @@ def _copy_matrix(node: Any, dst_root: Any, key: str, cfg: AppConfig, *, rechunk:
                 overwrite=True,
             )
         out.attrs.update(dict(src_a.attrs))
+        check_write_unit(out)
         step = write_grid(out)[0]
-        seg = max(1, _layout.BATCH_BYTES // (step * src_a.dtype.itemsize)) * step
-        flat_jobs = [(src_a, out, s0, min(s0 + seg, nnz)) for s0 in range(0, nnz, seg)]
+        bytes_per_item = _layout.copy_bytes_per_item(src_a.dtype.itemsize)
+        segments = _layout.plan_bands(
+            nnz, unit=step, bytes_per_item=bytes_per_item, cpus=cfg.chunks.cpus, grain=src_a.chunks[0]
+        )
+        flat_jobs = [(src_a, out, s0, s1) for s0, s1 in segments]
         run_parallel(_copy_flat, flat_jobs, cfg.chunks.cpus)
     ip = node["indptr"]
     out = g.require_array("indptr", shape=ip.shape, dtype=ip.dtype, chunks=ip.shape, overwrite=True)
