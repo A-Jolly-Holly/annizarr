@@ -1,16 +1,29 @@
 from __future__ import annotations
 
-import shutil
-import tempfile
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import zarr
 
 from annizarr._core import _layout
-from annizarr._core._layout import write_grid, x_compressors
-from annizarr._core._runtime import ArrayTarget, pipeline_parallel, progress, run_parallel, writer_parallel_mode
+from annizarr._core._layout import (
+    check_write_unit,
+    copy_bytes_per_item,
+    major_bands,
+    plan_bands,
+    write_grid,
+    x_compressors,
+)
+from annizarr._core._runtime import (
+    ArrayTarget,
+    map_parallel,
+    pipeline_parallel,
+    progress,
+    run_parallel,
+    stage,
+    writer_parallel_mode,
+)
+from annizarr._writers._buckets import Buckets
 from annizarr._writers._encoding import make_sparse_group, set_array_attrs, sparse_shards, suppress_autoshard_warning
 
 if TYPE_CHECKING:
@@ -23,25 +36,10 @@ if TYPE_CHECKING:
     from annizarr._sources._readers import Reader
 
 type _CsrPayload = tuple[int, int, NDArray[Any], NDArray[Any]]
+type _Placed = tuple[int, int, NDArray[Any], NDArray[Any]]
 
-
-def _segment_size(step: int, bytes_per_nnz: int, budget: int, grain: int | None) -> int:
-    # always a multiple of the output write grid; also of the source chunk when that fits the budget
-    base = step
-    if grain is not None and grain > 0:
-        import math
-
-        unit = math.lcm(step, grain)
-        if unit * bytes_per_nnz <= budget:
-            base = unit
-    return max(1, budget // max(1, base * bytes_per_nnz)) * base
-
-
-def flat_segments(nnz_total: int, step: int, bytes_per_nnz: int, *, grain: int | None = None) -> list[tuple[int, int]]:
-    if nnz_total <= 0:
-        return []
-    seg = _segment_size(step, bytes_per_nnz, _layout.BATCH_BYTES, grain)
-    return [(s, min(s + seg, nnz_total)) for s in range(0, nnz_total, seg)]
+# target cells for the per-band histograms the scatter offsets come from; output bands are whole cells
+_TARGET_GRID = 8192
 
 
 def _no_tick() -> None:
@@ -143,9 +141,13 @@ def _write_compressed(
     if nnz_total == 0:
         return
 
-    bytes_per_nnz = np.dtype(reader.dtype).itemsize + np.dtype(indices_dtype).itemsize
+    check_write_unit(data_arr)
+    # the reader's own band cost plus zarr's write-side copy of what gets written
+    out_bytes = np.dtype(reader.dtype).itemsize + np.dtype(indices_dtype).itemsize
+    bytes_per_nnz = reader.band_bytes_per_nnz + copy_bytes_per_item(out_bytes) - out_bytes
     step = write_grid(data_arr)[0]
-    segments = flat_segments(nnz_total, step, bytes_per_nnz, grain=reader.grain)
+    cpus = cfg.chunks.cpus
+    segments = plan_bands(nnz_total, unit=step, bytes_per_item=bytes_per_nnz, cpus=cpus, grain=reader.grain)
     mode = writer_parallel_mode(reader, data_arr.store_path.store)
 
     if mode == "processes":
@@ -157,8 +159,10 @@ def _write_compressed(
 
     if mode == "pipeline":
         budget = min(_layout.BATCH_BYTES, _layout.PIPELINE_BATCH_BYTES)
-        pipeline_seg = _segment_size(step, bytes_per_nnz, budget, reader.grain)
-        pipeline_jobs = [(reader, s0, min(s0 + pipeline_seg, nnz_total)) for s0 in range(0, nnz_total, pipeline_seg)]
+        pipeline_segments = plan_bands(
+            nnz_total, unit=step, bytes_per_item=bytes_per_nnz, cpus=cpus, grain=reader.grain, budget=budget
+        )
+        pipeline_jobs = [(reader, s0, s1) for s0, s1 in pipeline_segments]
 
         def consume(payload: _CsrPayload) -> None:
             ps0, ps1, data, indices = payload
@@ -171,139 +175,338 @@ def _write_compressed(
     tick = progress(len(segments), f"Writing {key}")
     data_target = ArrayTarget.attached(data_arr)
     indices_target = ArrayTarget.attached(indices_arr)
-    cpus = cfg.chunks.cpus if mode == "threads" else 1
     jobs = [(data_target, indices_target, reader, s0, s1, indices_dtype, tick) for s0, s1 in segments]
     run_parallel(_csr_job, jobs, cpus, mode="threads")
 
 
-def write_transposed_sparse(
-    group: zarr.Group,
-    key: str,
+def _count_job(
+    reader: Reader, bands: list[tuple[int, int, int]], n_target: int, grid: int, close: bool
+) -> tuple[NDArray[np.int64], NDArray[np.int64]]:
+    # nonzeros per target over several source bands, plus each band's histogram over a fixed grid
+    # of target cells: enough to place every band's pieces at exact offsets without a bands by
+    # targets table (8192 cells is 64KB per band whatever the feature count)
+    total = np.zeros(n_target, dtype=np.int64)
+    hist = np.zeros((len(bands), grid), dtype=np.int64)
+    try:
+        for i, (_, s0, s1) in enumerate(bands):
+            tgt = reader.flat_indices(s0, s1)
+            total += np.bincount(tgt, minlength=n_target)
+            hist[i] = np.bincount(tgt.astype(np.int64) * grid // n_target, minlength=grid)
+    finally:
+        if close:
+            reader.close()
+    return total, hist
+
+
+def _scatter_band(
     reader: Reader,
-    cfg: AppConfig,
-    *,
-    row_scale: NDArray[np.float64] | None = None,
-    target: Literal["csc", "csr"],
+    s0: int,
+    s1: int,
+    b0: int,
+    row_nnz: NDArray[np.int64],
+    band_edges: NDArray[np.int64],
+    offsets: NDArray[np.int64],
+    buckets: Buckets,
+    close: bool,
+) -> None:
+    # one source band split by output band, each run written at its precomputed offset in source
+    # order; three large sorted arrays rather than one small array per band, so no allocator churn
+    try:
+        vals, tgt = reader.flat(s0, s1)
+    finally:
+        if close:
+            reader.close()
+    src = np.repeat(np.arange(b0, b0 + len(row_nnz), dtype=np.int32), row_nnz)
+    band_ids = np.searchsorted(band_edges, tgt, side="right")
+    order = np.argsort(band_ids, kind="stable")
+    bounds = np.searchsorted(band_ids[order], np.arange(len(band_edges) + 1))
+    src, tgt, vals = src[order], tgt[order], vals[order]
+    for bi in range(len(band_edges)):
+        lo, hi = int(bounds[bi]), int(bounds[bi + 1])
+        if lo < hi:
+            buckets.write_at(bi, int(offsets[bi]), src=src[lo:hi], tgt=tgt[lo:hi], val=vals[lo:hi])
+
+
+def _sorted_band(buckets: Buckets, band: int) -> tuple[NDArray[Any], NDArray[Any]]:
+    # entries of one output band back in source order; a stable sort by target gives each
+    # target's entries in ascending source position
+    order = np.argsort(buckets.read(band, "tgt"), kind="stable")
+    return buckets.read(band, "val")[order], buckets.read(band, "src")[order]
+
+
+def _place_job(
+    buckets: Buckets,
+    band: int,
+    o0: int,
+    o1: int,
+    data_target: ArrayTarget,
+    indices_target: ArrayTarget,
+    unit: int,
+    shared: Buckets,
+    shared_units: NDArray[np.int64],
+    indices_dtype: Any,
+) -> None:
+    # writes the write units this band alone covers straight to the store; a unit shared with a
+    # neighbouring band gets this band's part in a per-unit temp file, written once by _seam_job
+    vals, src = _sorted_band(buckets, band)
+    src = np.asarray(src, dtype=indices_dtype)
+    data_arr, indices_arr = data_target.resolve(), indices_target.resolve()
+    k_first, k_last = o0 // unit, (o1 - 1) // unit
+    owned: list[tuple[int, int]] = []
+    for k in range(k_first, k_last + 1):
+        lo, hi = max(o0, k * unit), min(o1, (k + 1) * unit)
+        if np.searchsorted(shared_units, k) < len(shared_units) and shared_units[np.searchsorted(shared_units, k)] == k:
+            shared.write_at(
+                int(np.searchsorted(shared_units, k)),
+                lo - k * unit,
+                val=vals[lo - o0 : hi - o0],
+                src=src[lo - o0 : hi - o0],
+            )
+        else:
+            owned.append((lo, hi))
+    if owned:  # consecutive, so one call lets the codec pool encode the units concurrently
+        lo, hi = owned[0][0], owned[-1][1]
+        data_arr[lo:hi] = vals[lo - o0 : hi - o0]
+        indices_arr[lo:hi] = src[lo - o0 : hi - o0]
+
+
+def _seam_job(
+    shared: Buckets,
+    i: int,
+    k: int,
+    unit: int,
+    data_target: ArrayTarget,
+    indices_target: ArrayTarget,
+    indices_dtype: Any,
+) -> None:
+    lo = k * unit
+    hi = lo + shared.counts[i]
+    data_target.resolve()[lo:hi] = shared.read(i, "val")
+    indices_target.resolve()[lo:hi] = np.asarray(shared.read(i, "src"), dtype=indices_dtype)
+
+
+def _place_band(buckets: Buckets, band: int, o0: int, o1: int) -> _Placed:
+    vals, src = _sorted_band(buckets, band)
+    return o0, o1, vals, src
+
+
+class _Placer:
+    # the non-local (Icechunk session) fallback: this process is the only writer, so it takes the
+    # sorted bands in order, carries the ragged tail into the next band so no chunk is written
+    # twice, and writes several units per call so the codec pool encodes them concurrently
+    def __init__(self, data_arr: Any, indices_arr: Any, unit: int, indices_dtype: Any) -> None:
+        self._data = data_arr
+        self._indices = indices_arr
+        self._unit = unit
+        self._indices_dtype = indices_dtype
+        self._pos = 0
+        self._vals: NDArray[Any] = np.empty(0, dtype=data_arr.dtype)
+        self._src: NDArray[Any] = np.empty(0, dtype=np.int32)
+        unit_bytes = unit * (data_arr.dtype.itemsize + np.dtype(indices_dtype).itemsize)
+        self._group = max(1, min(_codec_threads(), (_layout.BATCH_BYTES // 2) // max(1, unit_bytes)))
+
+    def consume(self, payload: _Placed) -> None:
+        o0, _, vals, src = payload
+        assert o0 == self._pos + len(self._vals), "output bands must arrive in order"
+        if len(self._vals):
+            vals = np.concatenate([self._vals, vals])
+            src = np.concatenate([self._src, src])
+        whole = ((self._pos + len(vals)) // self._unit) * self._unit - self._pos
+        grouped = (whole // (self._unit * self._group)) * (self._unit * self._group)
+        if grouped > 0:
+            self._write(vals[:grouped], src[:grouped])
+        self._vals, self._src = vals[grouped:].copy(), src[grouped:].copy()  # a view would pin the payload
+
+    def flush(self) -> None:
+        if len(self._vals):
+            self._write(self._vals, self._src)
+            self._vals, self._src = self._vals[:0], self._src[:0]
+
+    def _write(self, vals: NDArray[Any], src: NDArray[Any]) -> None:
+        end = self._pos + len(vals)
+        self._data[self._pos : end] = vals
+        self._indices[self._pos : end] = np.asarray(src, dtype=self._indices_dtype)
+        self._pos = end
+
+
+def _codec_threads() -> int:
+    import os
+
+    configured = zarr.config.get("threading.max_workers")
+    return int(configured) if configured else (os.cpu_count() or 1)
+
+
+def _output_bands(cell_nnz: NDArray[np.int64], max_nnz: int, cpus: int) -> list[tuple[int, int]]:
+    # consecutive grid cells per output band, at most max_nnz nonzeros unless one cell alone is
+    # larger, and at least cpus bands when the cells allow
+    target = max(1, min(max_nnz, int(cell_nnz.sum()) // max(cpus, 1) + 1))
+    bands: list[tuple[int, int]] = []
+    c0, acc = 0, 0
+    for c, n in enumerate(cell_nnz.tolist()):
+        if c > c0 and acc + n > target:
+            bands.append((c0, c))
+            c0, acc = c, 0
+        acc += n
+    bands.append((c0, len(cell_nnz)))
+    return bands
+
+
+def write_transposed_sparse(
+    group: zarr.Group, key: str, reader: Reader, cfg: AppConfig, *, target: Literal["csc", "csr"]
 ) -> zarr.Group:
-    # two BATCH_BYTES-bounded passes so the whole matrix is never materialised. `reader`
-    # always represents data in source-major ("row-like") terms: reader.shape[0] is the
-    # source major-axis count, reader.indptr is over it, reader.flat(...) gives (data,
-    # target-axis-index) in source-major flat order. The true output shape is reader.shape
-    # when target=="csc" (source is a normal CSR-shaped reader); when target=="csr" the
-    # source was CSC and is fed in pre-swapped (as_reader's _SwappedCSRView), so the true
-    # shape is reader.shape reversed.
+    # four band-bounded parallel passes with nothing in this process but small tables: count
+    # nonzeros per target and per (source band, target grid cell); scatter every source band's
+    # entries into per-output-band files at offsets known from those counts; place each output
+    # band sorted, writing the write units it alone covers; write the units shared by two bands
+    # once from per-unit files. `reader` is source-major: reader.shape[0] is the source major-axis
+    # count, reader.indptr is over it, reader.flat(...) gives (data, target-axis index) in
+    # source-major flat order. The true output shape is reader.shape when target=="csc"; a CSC
+    # source arrives pre-swapped (as_reader's _SwappedCSRView), so for target=="csr" it is reversed.
+    from zarr.storage import LocalStore
+
     n_source_major, n_target_major = reader.shape
     true_shape = reader.shape if target == "csc" else (n_target_major, n_source_major)
     indptr_src = reader.indptr
     nnz = reader.nnz
-    source_major_nnz = np.diff(indptr_src)
+    row_nnz = np.diff(indptr_src)
+    cpus = cfg.chunks.cpus
+    mode: Literal["threads", "processes"] = "threads" if reader.thread_safe else "processes"
+    close_in_worker = mode == "processes"
+    local = isinstance(group.store_path.store, LocalStore)
 
-    value_dtype = np.dtype(np.float32) if row_scale is not None else np.dtype(reader.dtype)
+    value_dtype = np.dtype(reader.dtype)
     indices_dtype = np.int32  # source-major positions in the output; matches scipy's default
     indptr_dtype = np.int64 if nnz > np.iinfo(np.int32).max else np.int32
 
-    target_nnz = np.zeros(n_target_major, dtype=np.int64)
-    flat_step = max(cfg.chunks.nnz_chunk, _layout.BATCH_BYTES // 8)
-    for s0 in range(0, nnz, flat_step):
-        s1 = min(s0 + flat_step, nnz)
-        _, idx = reader.flat(s0, s1)
-        target_nnz += np.bincount(idx, minlength=n_target_major)
+    scatter_nnz = max(1, _layout.BATCH_BYTES // _layout.SCATTER_BYTES_PER_NNZ)
+    source_bands = major_bands(indptr_src, max_nnz=scatter_nnz, cpus=cpus)
+    band_ranges = [(b0, int(indptr_src[b0]), int(indptr_src[b1])) for b0, b1 in source_bands]
+    grid = min(n_target_major, _TARGET_GRID)
+    cell_edges = -((-np.arange(grid + 1, dtype=np.int64) * n_target_major) // grid)  # ceil(c * n / grid)
+
+    with stage(f"Counting nonzeros per {'column' if target == 'csc' else 'row'} of {key}"):
+        n_jobs = min(len(band_ranges), max(1, 2 * cpus))
+        job_bands = [band_ranges[i::n_jobs] for i in range(n_jobs)] if nnz else []
+        results = map_parallel(
+            _count_job,
+            [(reader, bands, n_target_major, grid, close_in_worker) for bands in job_bands],
+            cpus,
+            mode=mode,
+        )
+        target_nnz = np.zeros(n_target_major, dtype=np.int64)
+        hist = np.zeros((len(band_ranges), grid), dtype=np.int64)
+        for i, (total, h) in enumerate(results):
+            target_nnz += total
+            hist[i::n_jobs] = h
     target_indptr = np.concatenate([[0], np.cumsum(target_nnz)]).astype(np.int64)
 
-    bytes_per_entry = value_dtype.itemsize + 16
-    max_band_nnz = max(1, _layout.BATCH_BYTES // bytes_per_entry)
-    edges = [0]
-    while edges[-1] < n_target_major:
-        want = target_indptr[edges[-1]] + max_band_nnz
-        nxt = int(np.searchsorted(target_indptr, want, side="right")) - 1
-        edges.append(min(max(nxt, edges[-1] + 1), n_target_major))
-    n_bands = len(edges) - 1
-    band_nnz = [int(target_indptr[edges[i + 1]] - target_indptr[edges[i]]) for i in range(n_bands)]
-
-    bytes_per_source_unit = max(1, nnz // max(1, n_source_major)) * 12
-    source_step = max(1_000, min(200_000, _layout.BATCH_BYTES // bytes_per_source_unit))
-
-    tmp_root = Path(tempfile.mkdtemp(prefix="annizarr_transpose_", dir=_local_tmp_dir(group)))
-    try:
-        buckets: list[dict[str, NDArray[Any]]] = []
-        for i, m in enumerate(band_nnz):
-            m = max(1, m)
-            buckets.append(
-                {
-                    "src": np.memmap(tmp_root / f"s{i}", dtype=np.int32, mode="w+", shape=(m,)),
-                    "tgt": np.memmap(tmp_root / f"t{i}", dtype=np.int32, mode="w+", shape=(m,)),
-                    "val": np.memmap(tmp_root / f"v{i}", dtype=value_dtype, mode="w+", shape=(m,)),
-                }
-            )
-        edges_arr = np.asarray(edges[1:], dtype=np.int64)
-        cursors = [0] * n_bands
-
-        bands = range(0, n_source_major, source_step)
-        tick = progress(len(bands), f"Transposing {key} to {target}")
-        for b0 in bands:
-            b1 = min(b0 + source_step, n_source_major)
-            s0, s1 = int(indptr_src[b0]), int(indptr_src[b1])
-            data_band, tgt_band = reader.flat(s0, s1)
-            src_pos = np.repeat(np.arange(b0, b1, dtype=np.int32), source_major_nnz[b0:b1])
-            if row_scale is not None:
-                factor = np.repeat(row_scale[b0:b1], source_major_nnz[b0:b1])
-                vals = np.log1p(data_band.astype(np.float64) * factor).astype(np.float32)
-            else:
-                vals = data_band
-            band_ids = np.searchsorted(edges_arr, tgt_band, side="right")
-            order = np.argsort(band_ids, kind="stable")
-            bounds = np.searchsorted(band_ids[order], np.arange(n_bands + 1))
-            for bi in range(n_bands):
-                lo, hi = int(bounds[bi]), int(bounds[bi + 1])
-                if lo == hi:
-                    continue
-                sel = order[lo:hi]
-                c = cursors[bi]
-                buckets[bi]["src"][c : c + hi - lo] = src_pos[sel]
-                buckets[bi]["tgt"][c : c + hi - lo] = tgt_band[sel]
-                buckets[bi]["val"][c : c + hi - lo] = vals[sel]
-                cursors[bi] = c + hi - lo
-            tick()
-
-        sp_group = make_sparse_group(group, key, csr=(target == "csr"), shape=true_shape)
-        flat_chunk = _layout.sparse_flat_chunk(cfg.chunks, csr=(target == "csr"), nnz=nnz, n_major=n_target_major)
-        shards = sparse_shards(cfg.chunks.auto_shard)
-        with suppress_autoshard_warning(cfg.chunks.auto_shard):
-            data_arr = sp_group.require_array(
-                "data",
-                shape=(nnz,),
-                dtype=value_dtype,
-                chunks=(flat_chunk,),
-                shards=shards,
-                compressors=x_compressors(),
-                overwrite=True,
-            )
-            indices_arr = sp_group.require_array(
-                "indices",
-                shape=(nnz,),
-                dtype=indices_dtype,
-                chunks=(flat_chunk,),
-                shards=shards,
-                compressors=x_compressors(),
-                overwrite=True,
-            )
-        indptr_arr = sp_group.require_array(
-            "indptr", shape=(n_target_major + 1,), dtype=indptr_dtype, chunks=(n_target_major + 1,), overwrite=True
+    sp_group = make_sparse_group(group, key, csr=(target == "csr"), shape=true_shape)
+    flat_chunk = _layout.sparse_flat_chunk(cfg.chunks, csr=(target == "csr"), nnz=nnz, n_major=n_target_major)
+    shards = sparse_shards(cfg.chunks.auto_shard)
+    with suppress_autoshard_warning(cfg.chunks.auto_shard):
+        data_arr = sp_group.require_array(
+            "data",
+            shape=(nnz,),
+            dtype=value_dtype,
+            chunks=(flat_chunk,),
+            shards=shards,
+            compressors=x_compressors(),
+            overwrite=True,
         )
-        for a in (data_arr, indices_arr, indptr_arr):
-            set_array_attrs(a)
-        indptr_arr[:] = target_indptr.astype(indptr_dtype)
+        indices_arr = sp_group.require_array(
+            "indices",
+            shape=(nnz,),
+            dtype=indices_dtype,
+            chunks=(flat_chunk,),
+            shards=shards,
+            compressors=x_compressors(),
+            overwrite=True,
+        )
+    indptr_arr = sp_group.require_array(
+        "indptr", shape=(n_target_major + 1,), dtype=indptr_dtype, chunks=(n_target_major + 1,), overwrite=True
+    )
+    for a in (data_arr, indices_arr, indptr_arr):
+        set_array_attrs(a)
+    indptr_arr[:] = target_indptr.astype(indptr_dtype)
+    if nnz == 0:
+        return sp_group
+    check_write_unit(data_arr)
 
-        for bi in range(n_bands):
-            m = band_nnz[bi]
-            if m == 0:
-                continue
-            order = np.argsort(np.asarray(buckets[bi]["tgt"][:m]), kind="stable")
-            o0, o1 = int(target_indptr[edges[bi]]), int(target_indptr[edges[bi + 1]])
-            # not write-grid aligned, but serial (no concurrent writers): a bounded perf cost.
-            data_arr[o0:o1] = np.asarray(buckets[bi]["val"][:m])[order]
-            indices_arr[o0:o1] = np.asarray(buckets[bi]["src"][:m])[order].astype(indices_dtype)
+    # output bands are whole grid cells, so each (source band, output band) count is a sum of
+    # histogram cells and every piece has an exact offset in its band's files
+    cell_nnz = np.diff(target_indptr[cell_edges])
+    place_nnz = max(1, _layout.BATCH_BYTES // _layout.PLACE_BYTES_PER_NNZ)
+    cells = _output_bands(cell_nnz, place_nnz, cpus)
+    band_edges = np.asarray([int(cell_edges[c1]) for _, c1 in cells], dtype=np.int64)  # target-index edges
+    flat_edges = target_indptr[np.concatenate([[0], band_edges])]
+    counts = np.stack([hist[:, c0:c1].sum(axis=1) for c0, c1 in cells], axis=1)  # (source band, output band)
+    offsets = np.cumsum(counts, axis=0) - counts
+    assert (counts.sum(axis=0) == np.diff(flat_edges)).all(), "grid counts must tile every output band"
+
+    unit = write_grid(data_arr)[0]
+    tmp_dir = _local_tmp_dir(group)
+    fields = {"src": np.dtype(np.int32), "tgt": np.dtype(np.int32), "val": value_dtype}
+    buckets = Buckets.create(len(cells), fields, dir=tmp_dir, prefix="annizarr_transpose_", sizes=np.diff(flat_edges))
+    shared_units = np.unique(flat_edges[1:-1] // unit)  # units containing a band boundary
+    shared_sizes = [min(unit, nnz - int(k) * unit) for k in shared_units]
+    shared = Buckets.create(
+        len(shared_units),
+        {"val": value_dtype, "src": np.dtype(np.int32)},
+        dir=tmp_dir,
+        prefix="annizarr_seams_",
+        sizes=shared_sizes,
+    )
+    try:
+        with stage(f"Transposing {key} to {target} ({len(source_bands)} source bands, {len(cells)} output bands)"):
+            scatter_jobs = [
+                (
+                    reader,
+                    s0,
+                    s1,
+                    b0,
+                    row_nnz[b0 : b0 + (source_bands[j][1] - b0)],
+                    band_edges,
+                    offsets[j],
+                    buckets,
+                    close_in_worker,
+                )
+                for j, (b0, s0, s1) in enumerate(band_ranges)
+            ]
+            run_parallel(_scatter_band, scatter_jobs, cpus, mode=mode)
+
+        with stage(f"Writing {key} ({target}, nnz={nnz})"):
+            if local:
+                data_target, indices_target = ArrayTarget.detached(data_arr), ArrayTarget.detached(indices_arr)
+                place_jobs = [
+                    (
+                        buckets,
+                        bi,
+                        int(flat_edges[bi]),
+                        int(flat_edges[bi + 1]),
+                        data_target,
+                        indices_target,
+                        unit,
+                        shared,
+                        shared_units,
+                        indices_dtype,
+                    )
+                    for bi in range(len(cells))
+                ]
+                run_parallel(_place_job, place_jobs, cpus, mode="processes")
+                seam_jobs = [
+                    (shared, i, int(k), unit, data_target, indices_target, indices_dtype)
+                    for i, k in enumerate(shared_units)
+                ]
+                run_parallel(_seam_job, seam_jobs, cpus, mode="processes")
+            else:
+                placer = _Placer(data_arr, indices_arr, unit, indices_dtype)
+                place_jobs_ic = [
+                    (buckets, bi, int(flat_edges[bi]), int(flat_edges[bi + 1])) for bi in range(len(cells))
+                ]
+                pipeline_parallel(_place_band, placer.consume, place_jobs_ic, cpus, mode="processes", ordered=True)
+                placer.flush()
     finally:
-        shutil.rmtree(tmp_root, ignore_errors=True)
+        buckets.remove()
+        shared.remove()
 
     return sp_group

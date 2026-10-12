@@ -9,7 +9,7 @@ from annizarr._sources._detect import detect_format
 from annizarr._sources._detect import register_sniffer as _register_sniffer
 from annizarr._sources._h5ad import close_lazy_if_needed, load_h5ad
 from annizarr._sources._memory import load_anndata
-from annizarr._sources._tenx import load_10x_h5
+from annizarr._sources._tenx import load_10x_h5, load_10x_lazy
 from annizarr.errors import ConversionError
 
 if TYPE_CHECKING:
@@ -32,6 +32,7 @@ __all__ = [
     "close_lazy_if_needed",
     "detect_format",
     "load_10x_h5",
+    "load_10x_lazy",
     "load_h5ad",
     "open_source",
     "register_source",
@@ -46,8 +47,10 @@ def _load_h5ad_source(path: PathLike, cfg: AppConfig) -> Source:
 
 
 def _load_10x_source(path: PathLike, cfg: AppConfig) -> Source:
-    logger.info("10x input loads whole (no lazy path).")
     try:
+        if cfg.io.lazy:
+            adata, reader = load_10x_lazy(path)
+            return Source(adata=adata, kind="10x", lazy=True, warnings=(), x_reader=reader)
         adata = load_10x_h5(path)
     except Exception as exc:
         raise ConversionError(f"Failed to read 10x H5 file: {exc}") from exc

@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from annizarr._core import _layout
-from annizarr._core._layout import band_plan, dense_shards, write_grid, x_compressors
+from annizarr._core._layout import band_plan, check_write_unit, dense_shards, write_grid, x_compressors
 from annizarr._core._runtime import ArrayTarget, pipeline_parallel, progress, run_parallel, writer_parallel_mode
 from annizarr._writers._encoding import set_array_attrs
 
@@ -26,11 +26,13 @@ def _no_tick() -> None:
 def _dense_job(
     target: ArrayTarget, reader: Reader, r0: int, r1: int, block_col: int, n_cols: int, tick: Callable[[], None]
 ) -> None:
-    # one row band fetched once, written as disjoint write-grid blocks (no read-modify-write)
+    # one row band fetched once, written in whole write-grid blocks (no read-modify-write), as
+    # many per write as the budget allows so zarr's codec pool encodes them concurrently
     try:
         arr = target.resolve()
         band = reader.dense_band(r0, r1)
-        for c0, c1 in band_plan(n_cols, block_col):
+        col_bands = band_plan(n_cols, block_col)
+        for c0, c1 in _pipeline_col_groups(col_bands, (r1 - r0) * reader.dtype.itemsize, _layout.BATCH_BYTES // 2):
             arr[r0:r1, c0:c1] = band.tile(c0, c1)
         tick()
     finally:
@@ -78,6 +80,7 @@ def write_dense(group: zarr.Group, key: str, reader: Reader, cfg: AppConfig) -> 
         overwrite=True,
     )
     set_array_attrs(zarr_arr)
+    check_write_unit(zarr_arr)
 
     block_row, block_col = write_grid(zarr_arr)
     row_bands = band_plan(n_rows, block_row)
