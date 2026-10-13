@@ -7,7 +7,8 @@ name = "annizarr"
 dynamic = ["version"]
 description = "AnnData zarr stores: convert, edit, and version with Icechunk"
 readme = "README.md"
-requires-python = ">=3.12"  # zarr>=3.3 needs >=3.12
+requires-python = ">=3.12,<3.15"  # zarr>=3.3 needs >=3.12; <3.15 only until h5py ships 3.15 wheels (none as of
+# 2026-10-13, so a 3.15 install tried to compile HDF5 from source); drop the cap when they appear
 license = "MIT"
 authors = [{ name = "Alex Holly", email = "alex.holly@alleninstitute.org" }]
 keywords = ["anndata", "zarr", "icechunk", "single-cell", "scrna-seq"]
@@ -41,10 +42,11 @@ dev = [
   "build",
   "twine",
 ]
+docs = ["mkdocs-material>=9"]
 
 [project.urls]
 Homepage = "https://github.com/A-Jolly-Holly/annizarr"
-Documentation = "https://github.com/A-Jolly-Holly/annizarr/tree/main/docs"
+Documentation = "https://a-jolly-holly.github.io/annizarr/"
 Repository = "https://github.com/A-Jolly-Holly/annizarr"
 Issues = "https://github.com/A-Jolly-Holly/annizarr/issues"
 

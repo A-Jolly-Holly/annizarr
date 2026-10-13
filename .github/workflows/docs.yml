@@ -1,0 +1,44 @@
+# Builds the documentation site with mkdocs on every PR and push to main, and deploys it to GitHub
+# Pages from main only. Pages must be set to deploy from GitHub Actions in the repository settings.
+name: docs
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  docs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: pyproject.toml  # installs the package, so it follows requires-python
+
+      - run: pip install ".[docs]"
+      - run: mkdocs build --strict
+
+      - if: github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    if: github.event_name != 'pull_request'
+    needs: docs
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
