@@ -1,0 +1,49 @@
+site_name: AnniZarr
+site_description: Convert, edit and version AnnData zarr stores
+site_url: https://a-jolly-holly.github.io/annizarr/
+repo_url: https://github.com/A-Jolly-Holly/annizarr
+repo_name: A-Jolly-Holly/annizarr
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  features:
+    - content.code.copy
+    - navigation.sections
+    - navigation.footer
+
+nav:
+  - Home: index.md
+  - Operations:
+      - convert: ops/convert.md
+      - rechunk: ops/rechunk.md
+      - sort: ops/sort.md
+      - append: ops/append.md
+      - add-expr: ops/add-expr.md
+  - Icechunk: icechunk.md
+  - Reference:
+      - Python API: python-api.md
+      - CLI: cli.md
+      - What annizarr writes: stores.md
+
+# the CLI reference generator lives next to the page it writes; it is not a page
+exclude_docs: |
+  gen_cli_reference.py
+  __pycache__/
+
+markdown_extensions:
+  - admonition
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight
+  - pymdownx.superfences
+
+# promoted to warnings so `mkdocs build --strict` fails on a broken page link or anchor
+validation:
+  nav:
+    omitted_files: warn
+  links:
+    not_found: warn
+    anchors: warn
+    unrecognized_links: warn

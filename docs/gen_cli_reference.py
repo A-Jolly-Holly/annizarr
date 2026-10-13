@@ -2,7 +2,7 @@
 
     python docs/gen_cli_reference.py
 
-tests/test_docs.py fails when the checked-in page is stale.
+tests/test_cli.py fails when the checked-in page is stale.
 """
 
 from __future__ import annotations
