@@ -18,7 +18,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version-file: pyproject.toml  # installs the package, so it follows requires-python
+          python-version: '3.14'  # same pin as ci.yml: h5py has no 3.15 wheels yet
 
       - run: pip install ".[docs]"
       - run: mkdocs build --strict
