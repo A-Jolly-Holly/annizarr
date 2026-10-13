@@ -1,6 +1,7 @@
 # Every PR and push installs fresh from PyPI, the way a user does, and runs the gates at both ends of
 # the supported Python range: `all` on the newest release with every extra, `core` on the 3.12 floor
-# with the hard dependencies only. The slow memory-ceiling test runs on pushes to main.
+# with the hard dependencies only, anndata and pandas pinned to their floors. The slow memory-ceiling
+# test runs on pushes to main and on manual dispatch.
 name: CI
 
 on:
@@ -31,7 +32,8 @@ jobs:
         run: pytest -m slow --no-cov  # a few minutes, out of core testing
 
   core:
-    # hard deps only, on the oldest supported Python: the extras stay optional and the floor holds
+    # hard deps only, at the floor: the oldest supported Python, anndata and pandas at their lower bounds
+    # (anndata 0.12 shipped against pandas 2); the extras stay optional and the floor holds
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -41,7 +43,8 @@ jobs:
         with:
           python-version: '3.12'
 
-      - run: pip install . pytest pytest-cov hypothesis
+      - run: pip install . "anndata==0.12.7" "pandas~=2.3.0" pytest pytest-cov hypothesis
+      - run: pip freeze | grep -iE '^(anndata|zarr|pandas|numpy|scipy|h5py)=='
       - run: pytest --no-cov
 
   build:
