@@ -3,6 +3,7 @@
 __pycache__/
 .pytest_cache/
 .mypy_cache/
+Release_notes.md
 .ruff_cache/
 .hypothesis/
 benchmarking/

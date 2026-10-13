@@ -19,7 +19,7 @@ classifiers = [
   "Operating System :: OS Independent",
 ]
 dependencies = [
-  "anndata>=0.13",  # 0.13 lists X in .layers under None
+  "anndata>=0.12.7",  # 0.12.7 fixed backed sparse slicing on scipy>=1.17; 0.13 lists X in .layers under None, handled either way
   "pandas>=2.3",  # imported directly (frame prep, append); floor matches anndata's
   "zarr>=3.3",
   "numpy>=2.1",
@@ -107,6 +107,9 @@ filterwarnings = [
   "ignore:Consolidated metadata is currently not part in the Zarr format 3 specification:UserWarning",
   # fixtures deliberately build duplicate-obs-name stores to test append's overlap handling.
   "ignore:Observation names are not unique:UserWarning",
+  # anndata 0.12.14+ says this on every zarr write made with auto_shard_zarr_v3 unset; annizarr's own
+  # writes set it explicitly, so only the fixtures' anndata writes trigger it.
+  "ignore:zarr v3 autosharding will be the default in the next minor release:UserWarning",
 ]
 
 [tool.coverage.run]

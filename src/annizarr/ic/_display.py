@@ -80,7 +80,7 @@ class Group(zarr.Group):
 
 def _alias_in_anndata_registry() -> None:
     # anndata dispatches read/write on the exact store type, so its zarr.Group entries are
-    # repeated for Group (private registry, checked against anndata 0.13.4)
+    # repeated for Group (private registry, checked against anndata 0.12.7 through 0.13.4)
     from anndata._io.specs.registry import _LAZY_REGISTRY, _REGISTRY
 
     registries: list[Any] = [_REGISTRY, _LAZY_REGISTRY]  # Any: the two registries' value types differ

@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
 import pandas as pd
-from anndata._io.specs import write_elem  # private API; checked against anndata 0.13.4
+from anndata._io.specs import write_elem  # private API; checked against anndata 0.12.7 through 0.13.4
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -64,11 +64,12 @@ def autoshard_setting(auto_shard: bool) -> Iterator[None]:
     import anndata as ad  # restored on exit; makes anndata's own write_elem pass shards="auto" too
 
     previous = ad.settings.auto_shard_zarr_v3
-    ad.settings.auto_shard_zarr_v3 = auto_shard
-    try:
-        yield
-    finally:
-        ad.settings.auto_shard_zarr_v3 = previous
+    with suppress_autoshard_warning(auto_shard):  # anndata<0.12.14 lets zarr's warning out of its own writes
+        ad.settings.auto_shard_zarr_v3 = auto_shard
+        try:
+            yield
+        finally:
+            ad.settings.auto_shard_zarr_v3 = previous
 
 
 @contextmanager
