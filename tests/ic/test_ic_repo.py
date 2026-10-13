@@ -227,7 +227,6 @@ def test_reprs_read_git_like(src_zarr, repo_path):
     assert "staged" not in repr(repo)
 
 
-@pytest.mark.filterwarnings("ignore:zarr v3 autosharding:UserWarning")  # bare write_elem, no autoshard setting
 @pytest.mark.filterwarnings("ignore::anndata.ImplicitModificationWarning")  # fixture has an int index
 def test_root_group_works_with_anndata_io(src_zarr, repo_path):
     """anndata dispatches on the exact store type; the display Group must still read and write."""
