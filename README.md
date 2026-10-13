@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/A-Jolly-Holly/annizarr/actions/workflows/ci.yml/badge.svg)](https://github.com/A-Jolly-Holly/annizarr/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/annizarr)](https://pypi.org/project/annizarr/)
+[![docs](https://github.com/A-Jolly-Holly/annizarr/actions/workflows/docs.yml/badge.svg)](https://a-jolly-holly.github.io/annizarr/)
 
 Convert to, append, sort anndata zarr storages efficiently with parallel and out of memory operations for all commands and api usage. Also, enable versioned anndata storage with Icechunk ease of use.
 
@@ -51,7 +52,7 @@ Icechunk history, branches, cherry-picks live in the Python API `annizarr.Repo` 
 ## Python API for Icechunk usage
 
 The full Python API, including the config dataclasses and the ops functions, is in
-[docs/python-api.md](https://github.com/A-Jolly-Holly/annizarr/blob/main/docs/python-api.md).
+the [Python API](https://a-jolly-holly.github.io/annizarr/python-api/) page.
 
 ```python
 import annizarr as az
@@ -77,8 +78,8 @@ the committed Icechunk snapshot id otherwise.
 
 ## Configuration and zarr stores
 
-Every flag is documented in `annizarr <command> --help`; [docs/cli.md](https://github.com/A-Jolly-Holly/annizarr/blob/main/docs/cli.md) has the same
-reference in one place. Inputs stream band by band by default, so memory stays bounded at any store
+Every flag is documented in `annizarr <command> --help`; the [CLI reference](https://a-jolly-holly.github.io/annizarr/cli/) has the same
+text in one place, and each operation has its own page in the [documentation](https://a-jolly-holly.github.io/annizarr/). Inputs stream band by band by default, so memory stays bounded at any store
 size (`--eager` loads the whole input first, faster for small files), and matrix writes use every
 core unless `--cpus` says otherwise.
 
@@ -102,17 +103,18 @@ attrs matching anndata's on-disk spec (anndata 0.12.7 or newer reads them). X an
 10x, mixed across inputs) and are written in whatever `--layout` asks for; X defaults to CSR.
 `convert`/`rechunk`/`sort` write to a sibling temp store, verify it opens, then rename it onto the
 target, so a killed run never leaves a partial store. On Icechunk every op is exactly one commit,
-and remote (`s3://`, `gs://`) outputs require it. More in [docs/stores.md](https://github.com/A-Jolly-Holly/annizarr/blob/main/docs/stores.md).
+and remote (`s3://`, `gs://`) outputs require it. More in [What annizarr writes](https://a-jolly-holly.github.io/annizarr/stores/).
 
 ## Development
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
-pip install -e ".[icechunk,dev]"
+pip install -e ".[icechunk,dev,docs]"
 pytest                                  # excludes -m slow by default
 pytest -m slow --no-cov                 # large synthetic-store memory-ceiling test
 ruff check src tests docs && ruff format --check src tests docs
 mypy --strict src/annizarr
+mkdocs serve                            # the documentation site, live at http://127.0.0.1:8000
 ```
 
 Golden stores for regression tests live in `tests/golden/`.
