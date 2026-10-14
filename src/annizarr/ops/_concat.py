@@ -11,7 +11,7 @@ from annizarr._sources import open_source
 from annizarr._sources._readers import ConcatReader, as_reader
 from annizarr._storage import check_output_target, open_output_store, store_name
 from annizarr._writers import write_matrix
-from annizarr._writers._encoding import autoshard_setting, prepare_frame, set_anndata_root_attrs, write_elem
+from annizarr._writers._encoding import set_anndata_root_attrs, write_elem, write_frame, write_settings
 from annizarr._writers._sparse import _local_tmp_dir
 from annizarr.errors import AnzError, ConversionError
 from annizarr.ops._result import OpResult
@@ -159,10 +159,10 @@ def concat(
                 readers.extend(as_reader(s_.x, cfg=cfg, tmp_dir=tmp_dir) for s_ in sources)
                 set_anndata_root_attrs(out.root)
 
-                with autoshard_setting(cfg.chunks.auto_shard):
+                with write_settings(cfg.chunks.auto_shard):
                     with stage("Writing metadata (obs, var, empty obsm/varm/uns/obsp/varp)"):
-                        write_elem(out.root, "obs", prepare_frame(obs_concat))
-                        write_elem(out.root, "var", prepare_frame(ref_var))
+                        write_frame(out.root, "obs", obs_concat)
+                        write_frame(out.root, "var", ref_var)
                         write_elem(out.root, "uns", {})
                         write_elem(out.root, "obsm", {})
                         write_elem(out.root, "varm", {})

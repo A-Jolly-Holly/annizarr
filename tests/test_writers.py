@@ -192,8 +192,10 @@ def test_write_unit_above_the_band_budget_warns(
     assert any("above the 0MB band budget" in r.message for r in caplog.records)
 
 
-def test_string_columns_are_written_as_nullable_string_arrays(tmp_path: Path) -> None:
-    # the encoding must not follow whichever dtype the installed pandas infers for text
+def test_string_columns_are_written_as_nullable_string_arrays(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # the encoding must follow neither the dtype the installed pandas infers for text nor anndata's
+    # allow_write_nullable_strings default (False on 0.12, where it refuses pandas string arrays)
+    monkeypatch.setattr(ad.settings, "allow_write_nullable_strings", False)
     obs = pd.DataFrame(
         {
             "barcode": [f"bc{i}" for i in range(8)],  # all distinct: stays a string
@@ -208,13 +210,32 @@ def test_string_columns_are_written_as_nullable_string_arrays(tmp_path: Path) ->
     out = tmp_path / "strings.zarr"
     convert_adata(adata, output=out, cfg=_cfg("csr", cpus=2))
 
+    assert ad.settings.allow_write_nullable_strings is False  # ours for the write only, then restored
     obs_group = zarr.open_group(str(out), mode="r")["obs"]
-    assert obs_group["_index"].attrs["encoding-type"] == "nullable-string-array"
-    assert obs_group["barcode"].attrs["encoding-type"] == "nullable-string-array"
+    for key in ("_index", "barcode"):
+        assert obs_group[key].attrs["encoding-type"] == "nullable-string-array"
+        assert obs_group[key].attrs["na-value"] == "NaN"  # anndata 0.12 omits it; pandas 3's str on read
     assert obs_group["batch"].attrs["encoding-type"] == "categorical"
+    assert obs_group["sparse_label"].attrs["encoding-type"] == "categorical"  # a missing value breaks uniqueness
     back = ad.read_zarr(str(out)).obs
     assert isinstance(back["barcode"].dtype, pd.StringDtype)
     assert back["barcode"].tolist() == obs["barcode"].tolist()
     assert back.index.tolist() == obs.index.tolist()
     assert back["sparse_label"].isna().tolist() == obs["sparse_label"].isna().tolist()
+    assert_anndata_readable(out)
+
+
+def test_rechunk_restores_na_value_on_stores_written_without_it(tmp_path: Path) -> None:
+    # a store written by anndata 0.12 (or annizarr under it) carries nullable strings with no na-value
+    adata = _adata(random_dense(16, 6, seed=12), sparse=True, seed=12)
+    src = tmp_path / "old.zarr"
+    convert_adata(adata, output=src, cfg=_cfg("csr", cpus=2))
+    index = zarr.open_group(str(src), mode="r+")["obs/_index"]
+    del index.attrs["na-value"]
+    assert "na-value" not in zarr.open_group(str(src), mode="r")["obs/_index"].attrs
+
+    out = tmp_path / "new.zarr"
+    rechunk(src, output=out, cfg=_cfg("csr", cpus=2))
+    assert zarr.open_group(str(out), mode="r")["obs/_index"].attrs["na-value"] == "NaN"
+    assert ad.read_zarr(str(out)).obs.index.tolist() == adata.obs.index.tolist()
     assert_anndata_readable(out)

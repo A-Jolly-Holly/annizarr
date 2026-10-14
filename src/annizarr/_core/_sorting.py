@@ -17,7 +17,7 @@ from annizarr._core._validation import require_matrix
 from annizarr._sources._readers import ConcatReader, CSRFileReader, as_reader
 from annizarr._storage import open_output_store
 from annizarr._writers._buckets import Buckets
-from annizarr._writers._encoding import autoshard_setting, prepare_frame, write_elem
+from annizarr._writers._encoding import write_elem, write_frame, write_settings
 from annizarr._writers._matrix import write_matrix
 from annizarr.errors import ConversionError
 
@@ -245,10 +245,10 @@ def stream_sorted_store(
             store = out.root
             store.attrs["encoding-type"] = "anndata"
             store.attrs["encoding-version"] = "0.1.0"
-            with autoshard_setting(cfg.chunks.auto_shard):
+            with write_settings(cfg.chunks.auto_shard):
                 with stage("Writing metadata (sorted obs/obsm; var/varm/varp/uns as-is)"):
-                    write_elem(store, "obs", prepare_frame(obs.iloc[perm]))
-                    write_elem(store, "var", prepare_frame(var))
+                    write_frame(store, "obs", obs.iloc[perm])
+                    write_frame(store, "var", var)
                     write_elem(store, "uns", dict(uns))
                     write_elem(
                         store, "obsm", {k: (v.iloc[perm] if hasattr(v, "iloc") else v[perm]) for k, v in obsm.items()}

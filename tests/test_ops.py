@@ -208,7 +208,9 @@ def test_append_extends_every_obs_encoding_and_drops_invalidated_obsm(
     assert got.n_obs == 55 and len(got.obsm) == 0
     np.testing.assert_allclose(got.X.toarray(), sp.vstack([a.X, b.X]).toarray())
     assert list(got.obs_names) == list(a.obs_names) + list(b.obs_names)
-    pd.testing.assert_frame_equal(got.obs, pd.concat([a.obs, b.obs], axis=0), check_dtype=False)
+    expected_obs = pd.concat([a.obs, b.obs], axis=0)
+    # anndata 0.12 reads the nullable index back as pandas 2's pd.NA string dtype, >=0.13 as pandas 3's str
+    pd.testing.assert_frame_equal(got.obs, expected_obs, check_dtype=False, check_index_type=False)
 
 
 def test_append_smaller_than_the_partial_chunk_still_lands(tmp_path: Path) -> None:

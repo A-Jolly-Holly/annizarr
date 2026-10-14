@@ -6,11 +6,11 @@ from annizarr._core._runtime import stage
 from annizarr._core._zarr import get_group
 from annizarr._sources._readers import as_reader
 from annizarr._writers._encoding import (
-    autoshard_setting,
-    prepare_frame,
     set_anndata_root_attrs,
     set_raw_group_attrs,
     write_elem,
+    write_frame,
+    write_settings,
 )
 from annizarr._writers._matrix import write_matrix
 from annizarr._writers._sparse import _local_tmp_dir
@@ -31,9 +31,9 @@ def write_adata(adata: ad.AnnData, store: zarr.Group, cfg: AppConfig, *, x: Any 
     # x: the matrix to write as X when it is not adata.X (a source's own reader)
     set_anndata_root_attrs(store)
 
-    with autoshard_setting(cfg.chunks.auto_shard), stage("Writing metadata (obs/var/uns/obsm/varm/obsp/varp)"):
-        write_elem(store, "obs", prepare_frame(adata.obs))
-        write_elem(store, "var", prepare_frame(adata.var))
+    with write_settings(cfg.chunks.auto_shard), stage("Writing metadata (obs/var/uns/obsm/varm/obsp/varp)"):
+        write_frame(store, "obs", adata.obs)
+        write_frame(store, "var", adata.var)
         write_elem(store, "uns", dict(adata.uns))
         write_elem(store, "obsm", dict(adata.obsm))
         write_elem(store, "varm", dict(adata.varm))
@@ -50,7 +50,7 @@ def write_adata(adata: ad.AnnData, store: zarr.Group, cfg: AppConfig, *, x: Any 
 
     layers = named_layers(adata)
     if layers:
-        with autoshard_setting(cfg.chunks.auto_shard):
+        with write_settings(cfg.chunks.auto_shard):
             write_elem(store, "layers", {})
         layers_group = get_group(store, "layers")
         for name, data in layers.items():
@@ -65,8 +65,8 @@ def write_adata(adata: ad.AnnData, store: zarr.Group, cfg: AppConfig, *, x: Any 
         raw: Any = adata.raw  # anndata 0.13 types Raw.varm against AnnData rather than Raw
         raw_group = store.require_group("raw")
         set_raw_group_attrs(raw_group)
-        with autoshard_setting(cfg.chunks.auto_shard):
-            write_elem(raw_group, "var", prepare_frame(raw.var))
+        with write_settings(cfg.chunks.auto_shard):
+            write_frame(raw_group, "var", raw.var)
             write_elem(raw_group, "varm", dict(raw.varm))
         reader = as_reader(raw.X, cfg=cfg, tmp_dir=tmp_dir)
         try:
