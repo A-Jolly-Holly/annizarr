@@ -192,9 +192,8 @@ def test_write_unit_above_the_band_budget_warns(
     assert any("above the 0MB band budget" in r.message for r in caplog.records)
 
 
-def test_string_columns_keep_the_plain_string_array_encoding(tmp_path: Path) -> None:
-    # pandas>=3 types text columns as str, which anndata writes as a nullable-string group unless
-    # the column is handed over as object; a column with missing values has to keep that group
+def test_string_columns_are_written_as_nullable_string_arrays(tmp_path: Path) -> None:
+    # the encoding must not follow whichever dtype the installed pandas infers for text
     obs = pd.DataFrame(
         {
             "barcode": [f"bc{i}" for i in range(8)],  # all distinct: stays a string
@@ -209,10 +208,13 @@ def test_string_columns_keep_the_plain_string_array_encoding(tmp_path: Path) -> 
     out = tmp_path / "strings.zarr"
     convert_adata(adata, output=out, cfg=_cfg("csr", cpus=2))
 
-    encodings = {k: zarr.open_group(str(out), mode="r")["obs"][k].attrs["encoding-type"] for k in obs.columns}
-    assert encodings["barcode"] == "string-array"
-    assert encodings["batch"] == "categorical"
+    obs_group = zarr.open_group(str(out), mode="r")["obs"]
+    assert obs_group["_index"].attrs["encoding-type"] == "nullable-string-array"
+    assert obs_group["barcode"].attrs["encoding-type"] == "nullable-string-array"
+    assert obs_group["batch"].attrs["encoding-type"] == "categorical"
     back = ad.read_zarr(str(out)).obs
+    assert isinstance(back["barcode"].dtype, pd.StringDtype)
     assert back["barcode"].tolist() == obs["barcode"].tolist()
+    assert back.index.tolist() == obs.index.tolist()
     assert back["sparse_label"].isna().tolist() == obs["sparse_label"].isna().tolist()
     assert_anndata_readable(out)
