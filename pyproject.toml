@@ -41,10 +41,11 @@ dev = [
   "build",
   "twine",
 ]
+docs = ["mkdocs-material>=9"]
 
 [project.urls]
 Homepage = "https://github.com/A-Jolly-Holly/annizarr"
-Documentation = "https://github.com/A-Jolly-Holly/annizarr/tree/main/docs"
+Documentation = "https://a-jolly-holly.github.io/annizarr/"
 Repository = "https://github.com/A-Jolly-Holly/annizarr"
 Issues = "https://github.com/A-Jolly-Holly/annizarr/issues"
 
