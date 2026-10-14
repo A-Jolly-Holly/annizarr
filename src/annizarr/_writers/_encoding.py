@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 from anndata._io.specs import write_elem  # private API; checked against anndata 0.12.7 through 0.13.4
+from pandas.api.types import infer_dtype
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -23,6 +24,7 @@ RAW_ENCODING_VERSION = "0.1.0"
 CSR_ENCODING_TYPE = "csr_matrix"
 CSC_ENCODING_TYPE = "csc_matrix"
 SPARSE_ENCODING_VERSION = "0.1.0"
+STRING_DTYPE = pd.StringDtype(na_value=float("nan"))  # pandas>=3's default `str`, available back to pandas 2.3
 
 
 def prepare_frame(df: pd.DataFrame) -> pd.DataFrame:
@@ -30,18 +32,28 @@ def prepare_frame(df: pd.DataFrame) -> pd.DataFrame:
 
     String columns whose values repeat become categoricals, by the same rule
     ``AnnData.write_zarr``/``write_h5ad`` apply (``strings_to_categoricals``: a column stays a
-    string array only when every value is unique, e.g. barcodes or ids). The index is coerced
-    to object dtype so it is written as a plain ``string-array`` on every pandas version;
-    pandas>=3's ``str`` index would otherwise become a nullable-string group. The caller's
-    frame is left untouched.
+    string array only when every value is unique, e.g. barcodes or ids). The index and every
+    column that stays a string are coerced to pandas>=3's ``str`` dtype, so they are written as
+    a ``nullable-string-array`` on every pandas version instead of following whichever dtype the
+    installed pandas infers for text. That is byte for byte what anndata's own writers produce
+    on pandas>=3. The caller's frame is left untouched.
     """
     import anndata as ad
 
     out = df.copy(deep=False)
-    if isinstance(out.index.dtype, pd.StringDtype):
-        out.index = out.index.astype(object)
+    if _is_string_like(out.index):
+        out.index = out.index.astype(STRING_DTYPE)
     ad.AnnData().strings_to_categoricals(out)  # converts columns on the copy, in place
+    for key in out.columns:
+        if _is_string_like(out[key]):
+            out[key] = out[key].astype(STRING_DTYPE)
     return out
+
+
+def _is_string_like(values: pd.Series[Any] | pd.Index[Any]) -> bool:
+    if isinstance(values.dtype, pd.StringDtype):
+        return True
+    return bool(values.dtype == object) and infer_dtype(values) == "string"
 
 
 def set_array_attrs(arr: zarr.Array[Any]) -> None:

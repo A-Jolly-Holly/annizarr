@@ -190,3 +190,29 @@ def test_write_unit_above_the_band_budget_warns(
     adata = _adata(random_dense(64, 64, seed=3, density=0.5), sparse=True, seed=3)
     convert_adata(adata, output=tmp_path / "big_unit.zarr", cfg=_cfg("csr", cpus=1, flat_chunk=2000))
     assert any("above the 0MB band budget" in r.message for r in caplog.records)
+
+
+def test_string_columns_keep_the_plain_string_array_encoding(tmp_path: Path) -> None:
+    # pandas>=3 types text columns as str, which anndata writes as a nullable-string group unless
+    # the column is handed over as object; a column with missing values has to keep that group
+    obs = pd.DataFrame(
+        {
+            "barcode": [f"bc{i}" for i in range(8)],  # all distinct: stays a string
+            "batch": ["a", "a", "b", "b", "c", "c", "d", "d"],  # repeats: becomes a categorical
+            "sparse_label": pd.Series([None, *[f"s{i}" for i in range(7)]], index=[str(i) for i in range(8)]),
+        },
+        index=[str(i) for i in range(8)],
+    )
+    adata = ad.AnnData(
+        X=sp.csr_matrix(random_dense(8, 6, seed=11)), obs=obs, var=pd.DataFrame(index=[f"g{i}" for i in range(6)])
+    )
+    out = tmp_path / "strings.zarr"
+    convert_adata(adata, output=out, cfg=_cfg("csr", cpus=2))
+
+    encodings = {k: zarr.open_group(str(out), mode="r")["obs"][k].attrs["encoding-type"] for k in obs.columns}
+    assert encodings["barcode"] == "string-array"
+    assert encodings["batch"] == "categorical"
+    back = ad.read_zarr(str(out)).obs
+    assert back["barcode"].tolist() == obs["barcode"].tolist()
+    assert back["sparse_label"].isna().tolist() == obs["sparse_label"].isna().tolist()
+    assert_anndata_readable(out)
