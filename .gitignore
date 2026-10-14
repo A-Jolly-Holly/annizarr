@@ -3,7 +3,6 @@
 __pycache__/
 .pytest_cache/
 .mypy_cache/
-Release_notes.md
 .ruff_cache/
 .hypothesis/
 benchmarking/
@@ -12,6 +11,5 @@ dist/
 htmlcov/
 .data/
 *.ipynb
-publish_steps.md
-CHANGELOG.md
+Release*
 site/
