@@ -13,6 +13,7 @@ from annizarr._storage._open import (
     open_input_group,
     open_output_store,
     open_store_rw,
+    verify_store_shape,
 )
 from annizarr._storage._uri import (
     bucket_prefix,
@@ -44,4 +45,5 @@ __all__ = [
     "storage_for",
     "store_name",
     "store_path",
+    "verify_store_shape",
 ]

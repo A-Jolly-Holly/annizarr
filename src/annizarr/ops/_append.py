@@ -20,8 +20,15 @@ from annizarr._core._zarr import (
     str_attr,
     str_list_attr,
 )
-from annizarr._storage import op_metadata, open_input_group, open_store_rw, store_name, store_path
-from annizarr.errors import ConversionError
+from annizarr._storage import (
+    op_metadata,
+    open_input_group,
+    open_store_rw,
+    store_name,
+    store_path,
+    verify_store_shape,
+)
+from annizarr.errors import AnzError, ConversionError
 from annizarr.ops._expr import target_sum_attr
 from annizarr.ops._result import AppendPlan, OpResult
 
@@ -242,7 +249,7 @@ def append(
                 f"extended layers {ext_layers} in place (lognorm applied to the appended "
                 "cells at each layer's recorded target_sum)."
             )
-    except ConversionError:
+    except AnzError:
         raise
     except Exception as e:
         raise ConversionError(
@@ -256,6 +263,8 @@ def append(
             "(partial overlap with existing cells)."
         )
     logger.warning("appended cells break any sorted-store contiguity; re-run `annizarr sort` if the store was sorted.")
+    nnz = int(indptr_t[-1]) + int(indptr_s[-1])
+    verify_store_shape(root, n_obs=n_t + n_s, n_vars=n_vars, nnz=nnz, layers=ext_layers)
     snapshot_id = finalize()
     return OpResult(path=store_path(store), n_obs=n_t + n_s, n_vars=n_vars, snapshot_id=snapshot_id)
 

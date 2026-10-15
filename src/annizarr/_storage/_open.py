@@ -18,6 +18,8 @@ from annizarr._version import __version__
 from annizarr.errors import RepoError, StorageError
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     import zarr
 
     from annizarr.ic import Repo
@@ -207,6 +209,36 @@ def _verify_new_store(root: zarr.Group, *, expected_shape: tuple[int, int] | Non
     actual_shape = (int(actual[0]), int(actual[1]))
     if actual_shape != expected_shape:
         raise StorageError(f"X shape mismatch: expected {expected_shape}, got {actual_shape}.")
+
+
+def verify_store_shape(
+    root: zarr.Group, *, n_obs: int, n_vars: int, nnz: int | None = None, layers: Sequence[str] = ()
+) -> None:
+    # metadata plus one indptr read per CSR matrix; proves the store is shaped right, not which bytes it holds
+    import numpy as np
+
+    from annizarr._core._zarr import element_length, get_array, get_group, shape_attr, str_attr, str_list_attr
+
+    indptr = np.asarray(get_array(get_group(root, "X"), "indptr")[:], dtype=np.int64)
+    if len(indptr) != n_obs + 1 or (np.diff(indptr) < 0).any():
+        raise StorageError(f"X/indptr is not {n_obs + 1} non-decreasing offsets.")
+    if nnz is not None and int(indptr[-1]) != nnz:
+        raise StorageError(f"X holds {int(indptr[-1])} nonzeros, expected {nnz}.")
+    for path in ("X", *(f"layers/{k}" for k in layers)):
+        matrix = get_group(root, path)
+        if shape_attr(matrix) != (n_obs, n_vars):
+            raise StorageError(f"{path} shape {shape_attr(matrix)} != {(n_obs, n_vars)}.")
+        if path != "X" and not np.array_equal(get_array(matrix, "indptr")[:], indptr):
+            raise StorageError(f"{path}/indptr differs from X's.")
+        for name in ("data", "indices"):
+            length = get_array(matrix, name).shape[0]
+            if length != indptr[-1]:
+                raise StorageError(f"{path}/{name} has {length} entries, indptr ends at {int(indptr[-1])}.")
+    obs = get_group(root, "obs")
+    for name in (str_attr(obs, "_index"), *str_list_attr(obs, "column-order")):
+        length = element_length(obs[name])
+        if length != n_obs:
+            raise StorageError(f"obs/{name} has {length} rows, expected {n_obs}.")
 
 
 def open_store_rw(

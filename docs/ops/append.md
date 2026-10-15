@@ -47,6 +47,10 @@ az.append("atlas.zarr", cells="batch2.zarr", drop_derived=True, extend_layers=Tr
 - Duplicate cells: `append` errors when every incoming cell is already present and warns on a partial
   overlap, since barcodes legitimately collide across samples.
 - A sorted store loses its contiguity. `append` warns about it, and `sort` restores it.
+- Before committing, `append` checks the store it wrote: X's offsets, nonzero count and shape, the
+  height of the index and every obs column, and any extended layer's offsets against X's. A mismatch
+  raises `StorageError`, and on Icechunk nothing is committed. The check proves the store is shaped
+  right, not that the values are the ones you appended.
 - On plain zarr the edit is in place and cannot be rolled back if the run dies midway. On Icechunk it
   is one commit, and a failed run leaves the repository as it was. With a `Repo` and `commit=False`
   the append is staged for a commit you make yourself; see

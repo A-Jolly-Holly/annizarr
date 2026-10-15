@@ -85,7 +85,7 @@ az.append(repo, cells="batch2.zarr")  # reads the mount, commits to the origin
 the commit to you, so several edits land as one snapshot with your own message and metadata. The
 results carry `snapshot_id=None`, as a plain-zarr result does. It needs a `Repo` instance (a path
 would open a repo the op then drops, losing the staged session) and an Icechunk store; anything
-else raises `StorageError`.
+else raises `StorageError`. Deferring skips the commit, never the checks `append` runs before it.
 
 ```python
 repo = az.Repo("s3://bucket/atlas.icechunk", branch="ingest-42")
