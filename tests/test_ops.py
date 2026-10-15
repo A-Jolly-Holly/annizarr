@@ -355,6 +355,26 @@ def test_append_reads_anndata_written_stores_and_keeps_the_store_column_encoding
     assert list(ad.read_zarr(str(tmp_path / "f.zarr")).obs_names) == [*f.obs_names, *g.obs_names]
 
 
+def test_append_widens_categorical_codes_that_outgrow_the_stored_width(tmp_path: Path) -> None:
+    """A categorical written with int8 codes keeps growing: the codes array is replaced at the next
+    signed width, the plan says so first, and the column reads back whole."""
+    a, b = _adata(n=250, seed=0), _adata(n=10, seed=1)
+    for x in (a, b):
+        x.obsm.clear()
+    a.obs["sample"] = pd.Categorical([f"s{i // 2}" for i in range(250)])  # 125 categories -> int8 codes
+    b.obs["sample"] = pd.Categorical([f"t{i // 2}" for i in range(10)])
+    sa, sb = _store(tmp_path, a, "a.zarr"), _store(tmp_path, b, "b.zarr")
+    assert zarr.open_group(str(sa), mode="r")["obs/sample/codes"].dtype == np.int8
+
+    assert any("codes widen int8 → int16" in n for n in plan_append(str(sa), cells=str(sb)).notes)
+    append(str(sa), cells=str(sb), cfg=cfg())
+    assert zarr.open_group(str(sa), mode="r")["obs/sample/codes"].dtype == np.int16
+    assert_anndata_readable(sa)
+    got = ad.read_zarr(str(sa))
+    assert len(got.obs["sample"].cat.categories) == 130
+    assert list(got.obs["sample"]) == [*a.obs["sample"], *b.obs["sample"]]
+
+
 def test_lifecycle_on_plain_and_consolidated_stores(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     a, b = _adata(n=40, seed=0), _adata(n=15, seed=1)
     sa = _store(tmp_path, a, "a.zarr", cfg(consolidate_metadata=True))

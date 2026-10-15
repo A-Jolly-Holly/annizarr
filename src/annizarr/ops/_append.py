@@ -37,6 +37,7 @@ _INDEX_SCAN_ROWS = 1 << 20
 _NULLABLE_ENCODINGS = ("nullable-integer", "nullable-boolean", "nullable-string-array")
 # mutually appendable: the store column keeps its encoding and the incoming values are converted
 _STRINGLIKE_ENCODINGS = ("categorical", "string-array", "nullable-string-array")
+_CODE_WIDTHS = (np.int8, np.int16, np.int32, np.int64)
 
 
 def plan_append(store: PathLike, *, cells: PathLike) -> AppendPlan:
@@ -269,7 +270,8 @@ def _check_obs_schema(obs_t: zarr.Group, obs_s: zarr.Group) -> list[str]:
             )
         if enc == "categorical":
             t_grp = as_group(t)
-            cat_t = np.asarray(get_array(t_grp, "categories")[:]).tolist()
+            cats_arr = get_array(t_grp, "categories")
+            cat_t = np.asarray(cats_arr[:]).tolist()
             if bool(t_grp.attrs.get("ordered", False)):
                 # ordered categories carry meaning in their order, so they must match exactly
                 s_grp = as_group(s) if enc_s == "categorical" else None
@@ -283,10 +285,12 @@ def _check_obs_schema(obs_t: zarr.Group, obs_s: zarr.Group) -> list[str]:
             else:
                 new = _new_categories(cat_t, _stringlike_labels(s))
                 if new:
-                    _check_category_room(t_grp, len(cat_t) + len(new), new, name)
+                    codes_arr = get_array(t_grp, "codes")
+                    want = _codes_dtype(cats_arr, codes_arr, len(cat_t) + len(new), new, name)
                     shown = ", ".join(map(str, new[:5])) + (", …" if len(new) > 5 else "")
                     plural = "y" if len(new) == 1 else "ies"
-                    notes.append(f"obs column '{name}': {len(new)} new categor{plural} appended ({shown}).")
+                    widen = f"; codes widen {codes_arr.dtype} → {want}" if want != codes_arr.dtype else ""
+                    notes.append(f"obs column '{name}': {len(new)} new categor{plural} appended ({shown}){widen}.")
         elif enc == "string-array" and enc_s != "string-array":
             if any(label is None for label in _stringlike_labels(s)):
                 raise ConversionError(
@@ -331,15 +335,16 @@ def _new_categories(categories: list[Any], labels: np.ndarray[Any, Any]) -> list
     return [label for label in pd.unique(labels) if label is not None and label not in known]
 
 
-def _check_category_room(t_grp: zarr.Group, n_categories: int, new: list[Any], name: str) -> None:
-    cats_arr, codes_arr = get_array(t_grp, "categories"), get_array(t_grp, "codes")
+def _codes_dtype(cats_arr: Any, codes_arr: Any, n_categories: int, new: list[Any], name: str) -> np.dtype[Any]:
+    # the stored code dtype, or the narrowest wider one that holds n_categories; -1 is missing, so signed
     if cats_arr.dtype.kind in "iufb":
         raise ConversionError(f"obs column '{name}': categories are {cats_arr.dtype}, cannot add {new[:5]}.")
-    if n_categories - 1 > np.iinfo(codes_arr.dtype).max:
-        raise ConversionError(
-            f"obs column '{name}': {n_categories} categories exceed its {codes_arr.dtype} code width; "
-            "rewrite the store with wider codes before appending."
-        )
+    current: np.dtype[Any] = codes_arr.dtype
+    if current.kind != "i":
+        raise ConversionError(f"obs column '{name}': codes are {current}, expected signed integers.")
+    if n_categories - 1 <= np.iinfo(current).max:
+        return current
+    return next(np.dtype(w) for w in _CODE_WIDTHS if np.iinfo(w).max >= n_categories - 1)
 
 
 def _index_values(obs: zarr.Group) -> zarr.Array[Any]:
@@ -512,11 +517,32 @@ def _extend_categorical(t: Any, labels: np.ndarray[Any, Any], n_t: int, n_new: i
     cats = np.asarray(cats_arr[:]).tolist()
     new = _new_categories(cats, labels)
     if new:
-        _check_category_room(t, len(cats) + len(new), new, name)
+        want = _codes_dtype(cats_arr, codes_arr, len(cats) + len(new), new, name)
         cats_arr.resize((len(cats) + len(new),))
         cats_arr[len(cats) :] = np.asarray(new, dtype=str)
+        if want != codes_arr.dtype:
+            codes_arr = _widen_codes(t, codes_arr, want, n_t)
     codes = pd.Categorical(labels, categories=[*cats, *new]).codes  # -1 where the label is None
     _extend_1d(codes_arr, codes, n_t, n_new)
+
+
+def _widen_codes(t: Any, codes_arr: Any, dtype: np.dtype[Any], n_t: int) -> Any:
+    # zarr cannot change an array's dtype, so the codes are rewritten into a replacement at the same path
+    # (the serializer is left automatic: a narrow array's carries no endianness, which a wide one needs)
+    existing = codes_arr[:n_t]
+    wide = t.create_array(
+        "codes",
+        shape=codes_arr.shape,
+        dtype=dtype,
+        chunks=codes_arr.chunks,
+        shards=codes_arr.shards,
+        fill_value=codes_arr.fill_value,
+        compressors=codes_arr.compressors,
+        attributes=dict(codes_arr.attrs),
+        overwrite=True,
+    )
+    wide[:n_t] = existing.astype(dtype)
+    return wide
 
 
 def _extend_1d(dst: Any, vals: Any, n_t: int, n_new: int) -> None:

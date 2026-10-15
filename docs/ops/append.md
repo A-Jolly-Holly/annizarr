@@ -41,6 +41,9 @@ az.append("atlas.zarr", cells="batch2.zarr", drop_derived=True, extend_layers=Tr
 - Obs columns keep the store's encoding. A categorical column gains new categories for values it has
   not seen and re-codes the incoming cells against them; an ordered categorical must match exactly. A
   plain string column accepts categorical cells as strings.
+- A categorical whose categories outgrow the code width it was written with (128 for `int8` codes,
+  32768 for `int16`) has its codes array rewritten at the next signed width. `plan_append` reports
+  the widening before anything is touched, and the rewrite is part of the same in-place edit.
 - Duplicate cells: `append` errors when every incoming cell is already present and warns on a partial
   overlap, since barcodes legitimately collide across samples.
 - A sorted store loses its contiguity. `append` warns about it, and `sort` restores it.
