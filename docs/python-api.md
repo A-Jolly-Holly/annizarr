@@ -12,6 +12,9 @@ Every op returns an `OpResult(path, n_obs, n_vars, snapshot_id)`. `snapshot_id` 
 zarr and the committed Icechunk snapshot id otherwise. `cfg` is an [`AppConfig`](#configuration)
 (defaults when omitted); `branch` and `message` only matter for Icechunk targets.
 
+`store`, `cells` and `output` are `annizarr.typing.StoreLike`: a local path, an `s3://` or `gs://`
+URI, or an [`az.Repo`](icechunk.md#a-repo-as-the-store), used as given with its branch and origin.
+
 | Function | Page |
 |---|---|
 | `az.convert(inputs, *, output, cfg=None, fmt=None, branch=None, message=None)` | [convert](ops/convert.md) |

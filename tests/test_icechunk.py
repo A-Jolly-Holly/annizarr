@@ -195,6 +195,29 @@ def test_failed_convert_leaves_no_commit(tmp_path: Path, monkeypatch: pytest.Mon
     assert [s.message for s in Repo(str(tmp_path / "repo.icechunk")).log(branch="main")] == ["Repository initialized"]
 
 
+@pytestmark_ic
+def test_a_repo_is_a_store(tmp_path: Path) -> None:
+    """A Repo is used as given: its branch receives the op, and a staged append is what a plan reads."""
+    from annizarr.ic import Repo
+    from annizarr.ops import plan_append
+
+    repo_path = tmp_path / "repo.icechunk"
+    convert_h5ad(
+        str(make_h5ad(tmp_path, adata=make_adata(n_obs=20, seed=0))), output=str(repo_path), cfg=cfg(backend="icechunk")
+    )
+    main_tip = Repo(str(repo_path)).log()[0].id
+    repo = Repo(str(repo_path))
+    repo.checkout("dev", create=True)
+    result = add_expr(repo, layout="csr", cfg=cfg())
+    assert result.path == str(repo_path) and repo.branch == "dev" and not repo.dirty
+    assert repo.log()[0].id == result.snapshot_id and Repo(str(repo_path)).log()[0].id == main_tip
+
+    cells = make_store(tmp_path, "b.zarr", adata=make_adata(n_obs=12, seed=1))
+    assert plan_append(repo, cells=str(cells)).extendable_layers == ("gexp",)
+    del repo.open_zarr("w")["layers/gexp"]
+    assert repo.dirty and plan_append(repo, cells=str(cells)).extendable_layers == ()
+
+
 @pytest.fixture
 def moto_s3(monkeypatch: pytest.MonkeyPatch):
     """A live moto S3 server with two fresh buckets; icechunk's Rust core needs a real endpoint."""

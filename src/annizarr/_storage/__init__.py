@@ -16,6 +16,7 @@ from annizarr._storage._uri import (
     prepare_output_path,
     scheme,
     store_name,
+    store_path,
 )
 
 __all__ = [
@@ -35,4 +36,5 @@ __all__ = [
     "scheme",
     "storage_for",
     "store_name",
+    "store_path",
 ]

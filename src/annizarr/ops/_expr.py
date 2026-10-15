@@ -11,7 +11,7 @@ from annizarr._core._config import AppConfig
 from annizarr._core._runtime import configure_runtime, map_parallel, stage
 from annizarr._core._zarr import get_group, shape_attr
 from annizarr._sources._readers import ScaledReader, as_reader
-from annizarr._storage import open_store_rw
+from annizarr._storage import open_store_rw, store_path
 from annizarr._writers._matrix import write_matrix
 from annizarr._writers._sparse import _local_tmp_dir
 from annizarr.errors import ConversionError
@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 
     from annizarr._core._config import ChunkConfig
     from annizarr._sources._readers import Reader
-    from annizarr.typing import Layout, PathLike
+    from annizarr.typing import Layout, StoreLike
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +39,7 @@ def target_sum_attr(attrs: Any) -> float | None:
 
 
 def add_expr(
-    store: PathLike,
+    store: StoreLike,
     *,
     layout: Layout = "csc",
     layer: str = "gexp",
@@ -54,7 +54,7 @@ def add_expr(
     Parameters
     ----------
     store
-        Existing AnnData zarr (or Icechunk) store to update, in place.
+        Existing AnnData zarr store, or an Icechunk repo (path or :class:`~annizarr.ic.Repo`) to update, in place.
     layout
         On-disk layout of the new layer: ``"csr"``, ``"csc"``, or ``"dense"``. Chunking
         follows ``cfg.chunks`` the way X's does on convert: ``row_chunk`` (csr), ``col_chunk``
@@ -91,7 +91,7 @@ def add_expr(
     write_expr_layer(root, cfg, layout=layout, layer=layer, target_sum=target_sum, overwrite=overwrite)
     n_obs, n_vars = shape_attr(get_group(root, "X"))
     snapshot_id = finalize()
-    return OpResult(path=str(store), n_obs=n_obs, n_vars=n_vars, snapshot_id=snapshot_id)
+    return OpResult(path=store_path(store), n_obs=n_obs, n_vars=n_vars, snapshot_id=snapshot_id)
 
 
 def write_expr_layer(

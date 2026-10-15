@@ -51,6 +51,7 @@ repo.copy("/work/store")  # clone with every branch and snapshot id intact
 | `Repo.init(zarr_path, out_path, message=None)` | New repo seeded from a plain zarr store as one commit. |
 | `Repo.exists(path, anonymous=False)` | Whether a repo exists there; never creates anything. |
 | `repo.branch`, `repo.branches()` | Current branch name; all branches. |
+| `repo.dirty` | Whether the open session holds uncommitted changes. |
 | `repo.checkout(branch, create=False)` | Switch this object to `branch`; `create=True` branches off the current tip. Returns the tip snapshot id. |
 | `repo.open_zarr("r", snapshot_id=None)` | Read-only root group at the branch tip, or at a past snapshot. |
 | `repo.open_zarr("w", truncate=False)` | Writable root group on a session at the branch tip; `truncate=True` starts from an empty root. |
@@ -59,6 +60,20 @@ repo.copy("/work/store")  # clone with every branch and snapshot id intact
 | `repo.log(branch=None)`, `repo.tree()` | Snapshots newest first; every branch's history as a text graph. |
 | `repo.cherrypick(snapshot_id)` | Point the current branch at `snapshot_id` (like `git reset --hard`). |
 | `repo.copy(dest)` | Copy the repo, every branch and snapshot id intact, to a fresh local directory or `s3://` prefix. |
+
+## A `Repo` as the store
+
+Every op accepts a `Repo` wherever it takes a path, for `store`, `cells` and `output` alike. The op
+uses the object as given: its branch, its `origin` and its credentials stand, so a read-only mount
+with a writable origin is reachable from any op. A `branch=` that differs from the repo's checks it
+out (created off the tip if missing). `plan_append(repo, cells=...)` reads what the repo has staged,
+so it sees an uncommitted append. Writing a new store onto a `Repo` (`convert`, `rechunk`, `sort`)
+needs `overwrite`, like a path, and a repo with uncommitted changes is refused.
+
+```python
+repo = az.Repo("/mnt/atlas.icechunk", origin="s3://bucket/atlas.icechunk", branch="ingest")
+az.append(repo, cells="batch2.zarr")  # reads the mount, commits to the origin
+```
 
 Credentials for `s3://` and `gs://` come from the environment: AWS variables, profile or instance
 role; gcloud application-default credentials.

@@ -13,12 +13,14 @@ from uuid import uuid4
 
 from annizarr._core._config import AppConfig
 from annizarr._storage._backends import is_icechunk_repo
-from annizarr._storage._uri import is_remote, prepare_output_path, store_name
-from annizarr.errors import StorageError
-from annizarr.typing import PathLike
+from annizarr._storage._uri import is_pathlike, is_remote, prepare_output_path, store_name, store_path
+from annizarr.errors import RepoError, StorageError
 
 if TYPE_CHECKING:
     import zarr
+
+    from annizarr.ic import Repo
+    from annizarr.typing import StoreLike
 
 logger = logging.getLogger(__name__)
 
@@ -30,20 +32,42 @@ class _SwapState(enum.Enum):
     ABORTED = "aborted"  # writer gave up; tmp cleaned up (or never existed)
 
 
-def check_output_target(output_path: PathLike, cfg: AppConfig) -> None:
-    # called before any expensive load; open_output_store repeats this right before writing.
-    if cfg.io.backend == "icechunk":
+def _supplied_repo(store: StoreLike) -> Repo | None:
+    return None if is_pathlike(store) else store
+
+
+def _as_repo(store: StoreLike, *, branch: str | None = None, icechunk: bool = False) -> Repo | None:
+    # a path is checked first so plain zarr never imports annizarr.ic
+    if is_pathlike(store):
+        if not (icechunk or is_remote(store) or is_icechunk_repo(store)):
+            return None
         from annizarr.ic import Repo
 
-        if Repo.exists(str(output_path)) and not cfg.io.overwrite:
+        return Repo(str(store), branch=branch)
+    return store
+
+
+def _checkout(repo: Repo, branch: str | None) -> None:
+    if branch is not None and branch != repo.branch:
+        repo.checkout(branch, create=True)
+
+
+def check_output_target(output_path: StoreLike, cfg: AppConfig) -> None:
+    # called before any expensive load; open_output_store repeats this right before writing.
+    supplied = _supplied_repo(output_path)
+    if supplied is not None or cfg.io.backend == "icechunk":
+        from annizarr.ic import Repo
+
+        if (supplied is not None or Repo.exists(str(output_path))) and not cfg.io.overwrite:
             raise StorageError(
-                f"Icechunk repo already exists at '{output_path}'. Pass --overwrite "
+                f"Icechunk repo already exists at '{store_path(output_path)}'. Pass --overwrite "
                 "(or IOConfig(overwrite=True)) to replace its contents."
             )
         return
-    if is_remote(output_path):
+    path = store_path(output_path)
+    if is_remote(path):
         return  # rejected later by open_output_store (remote requires the icechunk backend)
-    target = Path(output_path)
+    target = Path(path)
     if target.exists() and not cfg.io.overwrite:
         raise StorageError(
             f"Output path already exists: {target}. Pass --overwrite (or IOConfig(overwrite=True)) to replace it."
@@ -58,7 +82,7 @@ class OutputStore:
 
 
 def open_output_store(
-    output_path: PathLike,
+    output_path: StoreLike,
     cfg: AppConfig,
     *,
     commit_message: str | None = None,
@@ -69,15 +93,19 @@ def open_output_store(
 
     check_output_target(output_path, cfg)
 
-    if cfg.io.backend == "icechunk":
+    repo = _supplied_repo(output_path)
+    if repo is not None or cfg.io.backend == "icechunk":
         from annizarr.ic import Repo
 
-        exists = Repo.exists(str(output_path))
-        if not exists and not is_remote(output_path):
-            prepare_output_path(Path(output_path), cfg.io.overwrite)
-        repo = Repo(str(output_path)) if exists else Repo.create(str(output_path))
-        if branch is not None and branch != repo.branch:
-            repo.checkout(branch, create=True)
+        if repo is None:
+            path = str(output_path)
+            exists = Repo.exists(path)
+            if not exists and not is_remote(path):
+                prepare_output_path(Path(path), cfg.io.overwrite)
+            repo = Repo(path) if exists else Repo.create(path)
+        elif repo.dirty:
+            raise RepoError(f"Uncommitted changes on '{repo.branch}': commit() or discard() before writing onto it")
+        _checkout(repo, branch)
         root: zarr.Group = repo.open_zarr("w", truncate=True)  # truncate: a re-run must not append to old data
         committed: str | None = None
 
@@ -91,10 +119,11 @@ def open_output_store(
             return committed
 
         def abort_icechunk() -> None:
-            repo.discard()
+            repo.discard()  # the session was clean when opened, so this drops only what the op staged
 
         return OutputStore(root, finalize_icechunk, abort_icechunk)
 
+    output_path = str(output_path)
     if is_remote(output_path):
         raise StorageError(
             f"Remote output '{output_path}' requires the icechunk backend — pass --ic "
@@ -175,36 +204,33 @@ def _verify_new_store(root: zarr.Group, *, expected_shape: tuple[int, int] | Non
 
 
 def open_store_rw(
-    store_path: PathLike, cfg: AppConfig, *, commit_message: str | None = None, branch: str | None = None
+    store: StoreLike, cfg: AppConfig, *, commit_message: str | None = None, branch: str | None = None
 ) -> tuple[zarr.Group, Callable[[], str | None]]:
     import zarr
 
-    if cfg.io.backend == "icechunk" or is_remote(store_path) or is_icechunk_repo(store_path):
-        from annizarr.ic import Repo
-
-        repo = Repo(str(store_path))
-        if branch is not None and branch != repo.branch:
-            repo.checkout(branch, create=True)
+    repo = _as_repo(store, icechunk=cfg.io.backend == "icechunk")
+    if repo is not None:
+        _checkout(repo, branch)
         root: zarr.Group = repo.open_zarr("w")
         committed: str | None = None
 
         def finalize_icechunk() -> str | None:
             nonlocal committed
             if committed is None:
-                msg = commit_message or f"annizarr update → {store_name(store_path)}"
+                msg = commit_message or f"annizarr update → {store_name(store)}"
                 committed = repo.commit(msg)
                 logger.info(f"icechunk commit {committed} on branch '{repo.branch}'")
             return committed
 
         return root, finalize_icechunk
 
-    store_path = Path(store_path)
-    if not store_path.exists():
-        raise StorageError(f"Store does not exist: {store_path}")
+    path = Path(store_path(store))
+    if not path.exists():
+        raise StorageError(f"Store does not exist: {path}")
     # use_consolidated=False: anndata's write_elem refuses to edit a consolidated group.
-    root = zarr.open_group(str(store_path), mode="r+", use_consolidated=False)
+    root = zarr.open_group(str(path), mode="r+", use_consolidated=False)
 
-    meta_file = store_path / "zarr.json"
+    meta_file = path / "zarr.json"
     had_consolidated = meta_file.exists() and json.loads(meta_file.read_text()).get("consolidated_metadata") is not None
     finalized = False
 
@@ -212,19 +238,19 @@ def open_store_rw(
         nonlocal finalized
         if not finalized:
             if had_consolidated or cfg.io.consolidate_metadata:
-                zarr.consolidate_metadata(str(store_path))
+                zarr.consolidate_metadata(str(path))
             finalized = True
         return None
 
     return root, finalize
 
 
-def open_input_group(path: PathLike, *, branch: str | None = None, snapshot_id: str | None = None) -> zarr.Group:
+def open_input_group(store: StoreLike, *, branch: str | None = None, snapshot_id: str | None = None) -> zarr.Group:
     import zarr
 
-    if is_remote(path) or is_icechunk_repo(path):
-        from annizarr.ic import Repo
-
-        repo = Repo(str(path), branch=branch)
-        return repo.open_zarr("r", snapshot_id=snapshot_id)
-    return zarr.open_group(str(path), mode="r")
+    repo = _as_repo(store, branch=branch)
+    if repo is None:
+        return zarr.open_group(str(store), mode="r")
+    if repo.dirty and snapshot_id is None:  # reads what the caller has staged; "w" on a clean repo would open a session
+        return repo.open_zarr("w")
+    return repo.open_zarr("r", snapshot_id=snapshot_id)

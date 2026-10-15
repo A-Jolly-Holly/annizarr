@@ -14,7 +14,7 @@ from annizarr._core._runtime import configure_runtime
 from annizarr._core._sorting import _write_sorted_lazy, maybe_sort_adata
 from annizarr._core._validation import require_matrix
 from annizarr._sources import close_lazy_if_needed, detect_format, load_h5ad, open_source
-from annizarr._storage import check_output_target, open_output_store, store_name
+from annizarr._storage import check_output_target, open_output_store, store_name, store_path
 from annizarr._writers import write_adata
 from annizarr.errors import AnzError, ConversionError
 from annizarr.ops._concat import concat
@@ -23,14 +23,14 @@ from annizarr.ops._result import OpResult
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from annizarr.typing import PathLike
+    from annizarr.typing import PathLike, StoreLike
 
 logger = logging.getLogger(__name__)
 
 
 def write_adata_to_store(
     adata: ad.AnnData,
-    output_path: PathLike,
+    output_path: StoreLike,
     cfg: AppConfig,
     *,
     allow_grouping: bool = False,
@@ -44,8 +44,10 @@ def write_adata_to_store(
 
     if allow_grouping:
         if cfg.grouping.enabled and cfg.io.lazy:
-            snapshot_id = _write_sorted_lazy(adata, Path(output_path), cfg, branch=branch, message=message)
-            return OpResult(path=str(output_path), n_obs=adata.n_obs, n_vars=adata.n_vars, snapshot_id=snapshot_id)
+            snapshot_id = _write_sorted_lazy(adata, output_path, cfg, branch=branch, message=message)
+            return OpResult(
+                path=store_path(output_path), n_obs=adata.n_obs, n_vars=adata.n_vars, snapshot_id=snapshot_id
+            )
         adata = maybe_sort_adata(adata, cfg)
     elif cfg.grouping.enabled:
         raise ConversionError("grouping (sort_by) is only supported by convert for now.")
@@ -69,13 +71,13 @@ def write_adata_to_store(
         out.abort()
         raise
     logger.info(f"Done in {time.perf_counter() - t0:.1f}s")
-    return OpResult(path=str(output_path), n_obs=adata.n_obs, n_vars=adata.n_vars, snapshot_id=snapshot_id)
+    return OpResult(path=store_path(output_path), n_obs=adata.n_obs, n_vars=adata.n_vars, snapshot_id=snapshot_id)
 
 
 def convert_adata(
     adata: ad.AnnData,
     *,
-    output: PathLike,
+    output: StoreLike,
     cfg: AppConfig | None = None,
     branch: str | None = None,
     message: str | None = None,
@@ -91,7 +93,7 @@ def convert_adata(
 def convert_h5ad(
     path: PathLike,
     *,
-    output: PathLike,
+    output: StoreLike,
     cfg: AppConfig | None = None,
     branch: str | None = None,
     message: str | None = None,
@@ -119,7 +121,7 @@ def convert_h5ad(
 def convert_10x_h5(
     path: PathLike,
     *,
-    output: PathLike,
+    output: StoreLike,
     cfg: AppConfig | None = None,
     branch: str | None = None,
     message: str | None = None,
@@ -140,7 +142,7 @@ def convert_10x_h5(
 def convert(
     inputs: PathLike | ad.AnnData | Sequence[PathLike],
     *,
-    output: PathLike,
+    output: StoreLike,
     cfg: AppConfig | None = None,
     fmt: Literal["h5ad", "10x"] | None = None,
     branch: str | None = None,
@@ -160,7 +162,7 @@ def convert(
     inputs
         A single path/URI, an in-memory :class:`~anndata.AnnData`, or a sequence of paths.
     output
-        Destination store path or URI.
+        Destination store path or URI, or a :class:`~annizarr.ic.Repo`.
     cfg
         Resolved configuration; ``None`` uses the :class:`~annizarr.config.AppConfig` defaults.
     fmt
@@ -199,7 +201,7 @@ def convert(
 
 
 def _convert_one(
-    path: PathLike, output: PathLike, cfg: AppConfig, fmt: str | None, *, branch: str | None, message: str | None
+    path: PathLike, output: StoreLike, cfg: AppConfig, fmt: str | None, *, branch: str | None, message: str | None
 ) -> OpResult:
     kind = fmt or detect_format(path)
     if kind == "h5ad":

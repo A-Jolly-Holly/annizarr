@@ -20,7 +20,7 @@ from annizarr._core._zarr import (
     str_attr,
     str_list_attr,
 )
-from annizarr._storage import open_input_group, open_store_rw, store_name
+from annizarr._storage import open_input_group, open_store_rw, store_name, store_path
 from annizarr.errors import ConversionError
 from annizarr.ops._expr import target_sum_attr
 from annizarr.ops._result import AppendPlan, OpResult
@@ -29,7 +29,7 @@ if TYPE_CHECKING:
     import pandas as pd
 
     from annizarr._sources._readers import Reader
-    from annizarr.typing import PathLike
+    from annizarr.typing import StoreLike
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +40,7 @@ _STRINGLIKE_ENCODINGS = ("categorical", "string-array", "nullable-string-array")
 _CODE_WIDTHS = (np.int8, np.int16, np.int32, np.int64)
 
 
-def plan_append(store: PathLike, *, cells: PathLike) -> AppendPlan:
+def plan_append(store: StoreLike, *, cells: StoreLike) -> AppendPlan:
     """Validate an append and describe what it would do, without mutating anything.
 
     Reads metadata only (attrs, obs schema, small index/indptr arrays) from both stores.
@@ -48,9 +48,10 @@ def plan_append(store: PathLike, *, cells: PathLike) -> AppendPlan:
     Parameters
     ----------
     store
-        Existing AnnData zarr (or Icechunk) store the cells would be appended onto.
+        Existing AnnData zarr store, or an Icechunk repo (path or :class:`~annizarr.ic.Repo`), the cells
+        would be appended onto.
     cells
-        Another AnnData zarr store whose cells would be appended.
+        Another AnnData zarr (or Icechunk) store whose cells would be appended.
 
     Returns
     -------
@@ -135,9 +136,9 @@ def plan_append(store: PathLike, *, cells: PathLike) -> AppendPlan:
 
 
 def append(
-    store: PathLike,
+    store: StoreLike,
     *,
-    cells: PathLike,
+    cells: StoreLike,
     drop_derived: bool = False,
     extend_layers: bool = False,
     cfg: AppConfig | None = None,
@@ -156,9 +157,9 @@ def append(
     Parameters
     ----------
     store
-        Existing AnnData zarr (or Icechunk) store to append onto, in place.
+        Existing AnnData zarr store, or an Icechunk repo (path or :class:`~annizarr.ic.Repo`) to append onto, in place.
     cells
-        Another AnnData zarr store whose cells are appended.
+        Another AnnData zarr (or Icechunk) store whose cells are appended.
     drop_derived
         Consent to dropping derived obs-aligned elements the plan says would drop.
     extend_layers
@@ -234,7 +235,7 @@ def append(
         raise
     except Exception as e:
         raise ConversionError(
-            f"append failed mid-mutation; {store} may be inconsistent "
+            f"append failed mid-mutation; {store_path(store)} may be inconsistent "
             f"(plain zarr cannot roll back — icechunk discards uncommitted changes): {e}"
         ) from e
 
@@ -245,7 +246,7 @@ def append(
         )
     logger.warning("appended cells break any sorted-store contiguity; re-run `annizarr sort` if the store was sorted.")
     snapshot_id = finalize()
-    return OpResult(path=str(store), n_obs=n_t + n_s, n_vars=n_vars, snapshot_id=snapshot_id)
+    return OpResult(path=store_path(store), n_obs=n_t + n_s, n_vars=n_vars, snapshot_id=snapshot_id)
 
 
 def _check_obs_schema(obs_t: zarr.Group, obs_s: zarr.Group) -> list[str]:

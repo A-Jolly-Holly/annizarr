@@ -3,10 +3,11 @@ from __future__ import annotations
 import os
 import shutil
 from pathlib import Path
+from typing import TypeIs
 from urllib.parse import urlparse
 
 from annizarr.errors import StorageError
-from annizarr.typing import PathLike
+from annizarr.typing import PathLike, StoreLike
 
 _REMOTE_SCHEMES = frozenset({"s3", "gs", "gcs"})
 
@@ -44,9 +45,19 @@ def is_readonly_path(path: PathLike) -> bool:
     return not os.access(probe, os.W_OK)
 
 
-def store_name(path: PathLike) -> str:
+def is_pathlike(store: StoreLike) -> TypeIs[PathLike]:
+    return isinstance(store, str | os.PathLike)
+
+
+def store_path(store: StoreLike) -> str:
+    # where a store lives: the path or URI as given, or a Repo's own path
+    return str(store) if is_pathlike(store) else store.path
+
+
+def store_name(store: StoreLike) -> str:
     # tail component of a local path or URI, for commit messages
-    return str(path).rstrip("/").rsplit("/", 1)[-1] or str(path)
+    path = store_path(store)
+    return path.rstrip("/").rsplit("/", 1)[-1] or path
 
 
 def prepare_output_path(output_path: PathLike, overwrite: bool) -> None:
