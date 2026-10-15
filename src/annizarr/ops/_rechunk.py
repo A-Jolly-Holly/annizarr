@@ -8,7 +8,14 @@ from annizarr._core._config import AppConfig, resolve_backend_cfg
 from annizarr._core._layout import check_write_unit, dense_shards, write_grid
 from annizarr._core._runtime import configure_runtime, run_parallel, stage
 from annizarr._core._zarr import get_group, has_element, shape_attr
-from annizarr._storage import check_output_target, open_input_group, open_output_store, store_name, store_path
+from annizarr._storage import (
+    check_output_target,
+    op_metadata,
+    open_input_group,
+    open_output_store,
+    store_name,
+    store_path,
+)
 from annizarr._writers._encoding import sparse_shards, suppress_autoshard_warning
 from annizarr.errors import ConversionError
 from annizarr.ops._result import OpResult
@@ -78,7 +85,12 @@ def rechunk(
     ad.settings.zarr_write_format = 3
     commit_message = message or f"annizarr rechunk {matrix} → {store_name(output)}"
     out = open_output_store(
-        output, cfg, commit_message=commit_message, branch=branch, expected_shape=_matrix_shape(src["X"])
+        output,
+        cfg,
+        commit_message=commit_message,
+        commit_metadata=op_metadata("rechunk", source=store_name(store)),
+        branch=branch,
+        expected_shape=_matrix_shape(src["X"]),
     )
     try:
         dst = out.root

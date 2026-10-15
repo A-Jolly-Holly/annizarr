@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 from annizarr._core._config import AppConfig, resolve_backend_cfg
 from annizarr._core._sorting import stream_sorted_store
 from annizarr._core._zarr import get_group, has_element
-from annizarr._storage import check_output_target, is_remote, open_input_group, store_name, store_path
+from annizarr._storage import check_output_target, is_remote, op_metadata, open_input_group, store_name, store_path
 from annizarr.errors import ConversionError
 from annizarr.ops._result import OpResult
 
@@ -126,6 +126,7 @@ def sort(
         cfg,
         sort_by=by,
         commit_message=commit_message,
+        commit_metadata=op_metadata("sort", source=store_name(store)),
         branch=branch,
         after_write=after_write,
     )

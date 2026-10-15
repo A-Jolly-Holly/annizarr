@@ -9,7 +9,7 @@ from annizarr._core._runtime import configure_runtime, stage
 from annizarr._core._validation import require_matrix
 from annizarr._sources import open_source
 from annizarr._sources._readers import ConcatReader, as_reader
-from annizarr._storage import check_output_target, open_output_store, store_name, store_path
+from annizarr._storage import check_output_target, op_metadata, open_output_store, store_name, store_path
 from annizarr._writers import write_matrix
 from annizarr._writers._encoding import set_anndata_root_attrs, write_elem, write_frame, write_settings
 from annizarr._writers._sparse import _local_tmp_dir
@@ -150,7 +150,12 @@ def concat(
 
         commit_message = message or f"annizarr concat → {store_name(output_path)}"
         out = open_output_store(
-            output_path, cfg, commit_message=commit_message, branch=branch, expected_shape=(n_obs_total, n_vars)
+            output_path,
+            cfg,
+            commit_message=commit_message,
+            commit_metadata=op_metadata("concat", source=[store_name(p) for p in paths]),
+            branch=branch,
+            expected_shape=(n_obs_total, n_vars),
         )
         readers: list[Reader] = []
         try:

@@ -48,6 +48,8 @@ az.append("atlas.zarr", cells="batch2.zarr", drop_derived=True, extend_layers=Tr
   overlap, since barcodes legitimately collide across samples.
 - A sorted store loses its contiguity. `append` warns about it, and `sort` restores it.
 - On plain zarr the edit is in place and cannot be rolled back if the run dies midway. On Icechunk it
-  is one commit, and a failed run leaves the repository as it was.
+  is one commit, and a failed run leaves the repository as it was. With a `Repo` and `commit=False`
+  the append is staged for a commit you make yourself; see
+  [batching ops into one commit](../icechunk.md#batching-ops-into-one-commit).
 - `plan_append` returns an `AppendPlan(n_new, drop_obsm, drop_obsp, drop_layers, extendable_layers,
   n_duplicate_names, notes)`; `plan.drops(extend_layers)` lists the element paths that would go.

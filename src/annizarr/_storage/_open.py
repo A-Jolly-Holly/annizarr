@@ -8,12 +8,13 @@ import shutil
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from annizarr._core._config import AppConfig
 from annizarr._storage._backends import is_icechunk_repo
 from annizarr._storage._uri import is_pathlike, is_remote, prepare_output_path, store_name, store_path
+from annizarr._version import __version__
 from annizarr.errors import RepoError, StorageError
 
 if TYPE_CHECKING:
@@ -30,6 +31,10 @@ class _SwapState(enum.Enum):
     SWAPPING = "swapping"  # mid-swap; target may momentarily be missing
     DONE = "done"  # swap complete; tmp no longer exists at its tmp path
     ABORTED = "aborted"  # writer gave up; tmp cleaned up (or never existed)
+
+
+def op_metadata(op: str, **extra: Any) -> dict[str, Any]:
+    return {"annizarr": __version__, "op": op, **{k: v for k, v in extra.items() if v is not None}}
 
 
 def _supplied_repo(store: StoreLike) -> Repo | None:
@@ -86,6 +91,7 @@ def open_output_store(
     cfg: AppConfig,
     *,
     commit_message: str | None = None,
+    commit_metadata: dict[str, Any] | None = None,
     branch: str | None = None,
     expected_shape: tuple[int, int] | None = None,
 ) -> OutputStore:
@@ -114,7 +120,7 @@ def open_output_store(
             if committed is None:
                 _verify_new_store(root, expected_shape=expected_shape)
                 msg = commit_message or f"annizarr write → {store_name(output_path)}"
-                committed = repo.commit(msg)
+                committed = repo.commit(msg, metadata=commit_metadata)
                 logger.info(f"icechunk commit {committed} on branch '{repo.branch}'")
             return committed
 
@@ -204,11 +210,25 @@ def _verify_new_store(root: zarr.Group, *, expected_shape: tuple[int, int] | Non
 
 
 def open_store_rw(
-    store: StoreLike, cfg: AppConfig, *, commit_message: str | None = None, branch: str | None = None
+    store: StoreLike,
+    cfg: AppConfig,
+    *,
+    commit_message: str | None = None,
+    commit_metadata: dict[str, Any] | None = None,
+    branch: str | None = None,
+    commit: bool = True,
 ) -> tuple[zarr.Group, Callable[[], str | None]]:
     import zarr
 
     repo = _as_repo(store, icechunk=cfg.io.backend == "icechunk")
+    if not commit:
+        if repo is None:
+            raise StorageError(f"commit=False only applies to Icechunk stores; '{store_path(store)}' is plain zarr.")
+        if _supplied_repo(store) is None:
+            raise StorageError(
+                f"commit=False needs a Repo to hold the staged changes: pass az.Repo('{store_path(store)}') "
+                "and call repo.commit() after the ops."
+            )
     if repo is not None:
         _checkout(repo, branch)
         root: zarr.Group = repo.open_zarr("w")
@@ -216,9 +236,9 @@ def open_store_rw(
 
         def finalize_icechunk() -> str | None:
             nonlocal committed
-            if committed is None:
+            if commit and committed is None:
                 msg = commit_message or f"annizarr update → {store_name(store)}"
-                committed = repo.commit(msg)
+                committed = repo.commit(msg, metadata=commit_metadata)
                 logger.info(f"icechunk commit {committed} on branch '{repo.branch}'")
             return committed
 

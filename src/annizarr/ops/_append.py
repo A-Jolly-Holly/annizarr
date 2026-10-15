@@ -20,7 +20,7 @@ from annizarr._core._zarr import (
     str_attr,
     str_list_attr,
 )
-from annizarr._storage import open_input_group, open_store_rw, store_name, store_path
+from annizarr._storage import op_metadata, open_input_group, open_store_rw, store_name, store_path
 from annizarr.errors import ConversionError
 from annizarr.ops._expr import target_sum_attr
 from annizarr.ops._result import AppendPlan, OpResult
@@ -144,6 +144,7 @@ def append(
     cfg: AppConfig | None = None,
     branch: str | None = None,
     message: str | None = None,
+    commit: bool = True,
 ) -> OpResult:
     """Append the cells of another zarr store onto this one, in place.
 
@@ -171,6 +172,9 @@ def append(
         Ignored for plain zarr.
     message
         Icechunk commit message; ``None`` names the op and the two stores involved.
+    commit
+        ``False`` stages the append without committing, so several ops land in one commit made
+        with ``store.commit()``. Requires ``store`` to be a :class:`~annizarr.ic.Repo`.
 
     Returns
     -------
@@ -206,7 +210,14 @@ def append(
     configure_runtime(cfg.chunks.cpus)
     src = open_input_group(cells)
     commit_message = message or f"annizarr append {store_name(cells)} → {store_name(store)}"
-    root, finalize = open_store_rw(store, cfg, commit_message=commit_message, branch=branch)
+    root, finalize = open_store_rw(
+        store,
+        cfg,
+        commit_message=commit_message,
+        commit_metadata=op_metadata("append", cells=store_name(cells)),
+        branch=branch,
+        commit=commit,
+    )
 
     x_t, x_s = get_group(root, "X"), get_group(src, "X")
     n_t, n_vars = shape_attr(x_t)

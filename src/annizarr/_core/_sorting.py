@@ -81,7 +81,13 @@ def maybe_sort_adata(adata: ad.AnnData, cfg: AppConfig) -> ad.AnnData:
 
 
 def _write_sorted_lazy(
-    adata: ad.AnnData, output_path: StoreLike, cfg: AppConfig, *, branch: str | None = None, message: str | None = None
+    adata: ad.AnnData,
+    output_path: StoreLike,
+    cfg: AppConfig,
+    *,
+    branch: str | None = None,
+    message: str | None = None,
+    commit_metadata: dict[str, Any] | None = None,
 ) -> str | None:
     # streams X into temp per-group CSR stores (peak RAM one row-batch), unlike
     # maybe_sort_adata's adata[perm].copy() (~2x X in RAM).
@@ -117,6 +123,7 @@ def _write_sorted_lazy(
         cfg,
         sort_by=sort_by,
         commit_message=message or f"annizarr convert (sorted by {','.join(sort_by)}) → {store_name(output_path)}",
+        commit_metadata=commit_metadata,
         branch=branch,
     )
     return snapshot_id
@@ -165,6 +172,7 @@ def stream_sorted_store(
     *,
     sort_by: tuple[str, ...],
     commit_message: str | None = None,
+    commit_metadata: dict[str, Any] | None = None,
     branch: str | None = None,
     after_write: Callable[[zarr.Group], None] | None = None,
 ) -> str | None:
@@ -239,6 +247,7 @@ def stream_sorted_store(
             output_path,
             cfg,
             commit_message=commit_message or f"annizarr sort → {store_name(output_path)}",
+            commit_metadata=commit_metadata,
             branch=branch,
             expected_shape=(n_obs, n_vars),
         )

@@ -14,7 +14,7 @@ from annizarr._core._runtime import configure_runtime
 from annizarr._core._sorting import _write_sorted_lazy, maybe_sort_adata
 from annizarr._core._validation import require_matrix
 from annizarr._sources import close_lazy_if_needed, detect_format, load_h5ad, open_source
-from annizarr._storage import check_output_target, open_output_store, store_name, store_path
+from annizarr._storage import check_output_target, op_metadata, open_output_store, store_name, store_path
 from annizarr._writers import write_adata
 from annizarr.errors import AnzError, ConversionError
 from annizarr.ops._concat import concat
@@ -37,14 +37,18 @@ def write_adata_to_store(
     branch: str | None = None,
     message: str | None = None,
     x: Any = None,
+    source: PathLike | None = None,
 ) -> OpResult:
     # x: the matrix written as X when it is not adata.X (a lazy 10x source's reader)
+    metadata = op_metadata("convert", source=None if source is None else store_name(source))
     cfg = resolve_backend_cfg(cfg)
     configure_runtime(cfg.chunks.cpus)
 
     if allow_grouping:
         if cfg.grouping.enabled and cfg.io.lazy:
-            snapshot_id = _write_sorted_lazy(adata, output_path, cfg, branch=branch, message=message)
+            snapshot_id = _write_sorted_lazy(
+                adata, output_path, cfg, branch=branch, message=message, commit_metadata=metadata
+            )
             return OpResult(
                 path=store_path(output_path), n_obs=adata.n_obs, n_vars=adata.n_vars, snapshot_id=snapshot_id
             )
@@ -62,7 +66,12 @@ def write_adata_to_store(
     t0 = time.perf_counter()
     commit_message = message or f"annizarr convert → {store_name(output_path)}"
     out = open_output_store(
-        output_path, cfg, commit_message=commit_message, branch=branch, expected_shape=(adata.n_obs, adata.n_vars)
+        output_path,
+        cfg,
+        commit_message=commit_message,
+        commit_metadata=metadata,
+        branch=branch,
+        expected_shape=(adata.n_obs, adata.n_vars),
     )
     try:
         write_adata(adata, out.root, cfg, x=x)
@@ -108,7 +117,9 @@ def convert_h5ad(
         adata, load_warnings = load_h5ad(Path(path), cfg)
         for w in load_warnings:
             logger.warning(w)
-        return write_adata_to_store(adata, output, cfg, allow_grouping=True, branch=branch, message=message)
+        return write_adata_to_store(
+            adata, output, cfg, allow_grouping=True, branch=branch, message=message, source=path
+        )
     except AnzError:
         raise
     except Exception as e:
@@ -133,7 +144,7 @@ def convert_10x_h5(
     source = open_source(path, cfg, fmt="10x")
     try:
         return write_adata_to_store(
-            source.adata, output, cfg, allow_grouping=False, branch=branch, message=message, x=source.x
+            source.adata, output, cfg, allow_grouping=False, branch=branch, message=message, x=source.x, source=path
         )
     finally:
         source.close()
@@ -216,7 +227,7 @@ def _convert_one(
         for w in source.warnings:
             logger.warning(w)
         return write_adata_to_store(
-            source.adata, output, cfg, allow_grouping=False, branch=branch, message=message, x=source.x
+            source.adata, output, cfg, allow_grouping=False, branch=branch, message=message, x=source.x, source=path
         )
     finally:
         source.close()

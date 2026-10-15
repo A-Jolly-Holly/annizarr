@@ -23,6 +23,10 @@ annizarr sort repo.icechunk -o sorted.icechunk --by cell_type --ic
 Every op returns an `OpResult` whose `snapshot_id` is the committed snapshot. A failed op leaves the
 repository at the previous snapshot, because Icechunk discards uncommitted changes.
 
+Each commit carries metadata alongside its message: the annizarr version, the op, and the input it
+read where there is one (`{"annizarr": "0.2.3", "op": "append", "cells": "batch2.zarr"}`). It is on
+`repo.log()[0].metadata`.
+
 ## `az.Repo`
 
 ```python
@@ -74,6 +78,23 @@ needs `overwrite`, like a path, and a repo with uncommitted changes is refused.
 repo = az.Repo("/mnt/atlas.icechunk", origin="s3://bucket/atlas.icechunk", branch="ingest")
 az.append(repo, cells="batch2.zarr")  # reads the mount, commits to the origin
 ```
+
+## Batching ops into one commit
+
+`append` and `add_expr` take `commit=False`, which stages the edit on the `Repo` you pass and leaves
+the commit to you, so several edits land as one snapshot with your own message and metadata. The
+results carry `snapshot_id=None`, as a plain-zarr result does. It needs a `Repo` instance (a path
+would open a repo the op then drops, losing the staged session) and an Icechunk store; anything
+else raises `StorageError`.
+
+```python
+repo = az.Repo("s3://bucket/atlas.icechunk", branch="ingest-42")
+az.append(repo, cells="batch42.zarr", drop_derived=True, commit=False)
+az.add_expr(repo, layout="csr", commit=False)
+repo.commit("ingest 42", metadata={"run": "42"})
+```
+
+There is no CLI flag: one op per process has nothing to batch.
 
 Credentials for `s3://` and `gs://` come from the environment: AWS variables, profile or instance
 role; gcloud application-default credentials.
