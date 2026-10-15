@@ -122,7 +122,8 @@ options:
 Append another store's cells onto this one, in place
 
 ```text
-usage: annizarr append [-h] [--drop-derived] [--extend-layers] [--cpus CPUS] [--branch B] [-m MSG]
+usage: annizarr append [-h] [--drop-derived] [--include-new-obs] [--extend-layers] [--cpus CPUS]
+                       [--branch B] [-m MSG]
                        STORE CELLS
 
 positional arguments:
@@ -133,6 +134,8 @@ options:
   -h, --help         show this help message and exit
   --drop-derived     consent up front to dropping derived obs-aligned elements
                      (obsm/obsp/incompatible layers); without it you are prompted
+  --include-new-obs  add obs columns only the cells carry, missing on the existing cells; default:
+                     leave them out with a warning
   --extend-layers    extend eligible add-expr CSR layers in place instead of dropping them
   --cpus CPUS        parallel band workers (default: all cores)
   --branch B         Icechunk branch to read/write, created off main if missing (default: main);

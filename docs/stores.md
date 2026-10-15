@@ -83,6 +83,7 @@ Remote targets (`s3://`, `gs://`) require Icechunk; credentials come from the en
   not seen and re-codes incoming strings or differently coded categoricals against them (ordered
   categoricals must match exactly); a plain string column accepts categorical cells as strings. A
   categorical that outgrows the code width it was written with has its codes array rewritten at the
-  next signed width.
+  next signed width. Obs columns are matched by name: one the cells lack gets missing values on the
+  appended rows, one only the cells carry is left out unless `--include-new-obs`.
 - `sort` re-derives a lone `layers/gexp` on the sorted output with the layer's own layout and
   chunking.

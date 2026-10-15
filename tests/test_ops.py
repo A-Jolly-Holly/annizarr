@@ -10,7 +10,7 @@ import pandas as pd
 import pytest
 import scipy.sparse as sp
 import zarr
-from anndata.io import read_elem, sparse_dataset
+from anndata.io import read_elem, sparse_dataset, write_elem
 
 from annizarr._storage import open_input_group
 from annizarr.config import AppConfig, ChunkConfig, GroupingConfig
@@ -396,3 +396,68 @@ def test_lifecycle_on_plain_and_consolidated_stores(tmp_path: Path, caplog: pyte
     add_expr(str(sa), layout="csc", cfg=_layer_cfg(32))
     append(str(sa), cells=str(sb), drop_derived=True, cfg=cfg())
     assert ad.read_zarr(str(sa)).n_obs == 55
+
+
+def test_append_reconciles_obs_column_sets(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """A store column the cells lack gets missing values; a cells-only column is left out unless
+    include_new_obs adds it full height; a plain string column the cells lack is refused."""
+    a, b = _adata(n=8, seed=0), _adata(n=4, seed=1)
+    for x in (a, b):
+        x.obsm.clear()
+    a.obs["score"] = np.linspace(0, 1, 8)
+    a.obs["donor"] = pd.Categorical(["d1", "d2"] * 4)
+    b.obs["batch"] = pd.Categorical(["x", "y", "x", "y"])
+    plan = plan_append(str(_store(tmp_path, a, "p.zarr")), cells=str(_store(tmp_path, b, "b.zarr")))
+    assert plan.obs_extra == ("batch",) and plan.obs_filled == ("score", "donor") and plan.obs_promoted == ()
+
+    sa = _store(tmp_path, a, "a.zarr")
+    append(str(sa), cells=str(tmp_path / "b.zarr"), cfg=cfg())
+    assert any("not in the cells: ['score', 'donor']" in m for m in messages(caplog))
+    assert any("['batch'] not appended" in m for m in messages(caplog))
+    assert_anndata_readable(sa)
+    got = ad.read_zarr(str(sa))
+    assert "batch" not in got.obs and got.obs["score"].iloc[8:].isna().all() and got.obs["donor"].iloc[8:].isna().all()
+    np.testing.assert_allclose(got.obs["score"].iloc[:8], a.obs["score"])
+
+    sn = _store(tmp_path, a, "n.zarr")
+    append(str(sn), cells=str(tmp_path / "b.zarr"), include_new_obs=True, cfg=cfg())
+    assert zarr.open_group(str(sn), mode="r")["obs"].attrs["column-order"][-1] == "batch"
+    got = ad.read_zarr(str(sn))
+    assert got.obs["batch"].iloc[:8].isna().all() and list(got.obs["batch"].iloc[8:]) == list(b.obs["batch"])
+
+    ss = _store(tmp_path, _adata(n=8, seed=2), "s.zarr")
+    obs = zarr.open_group(str(ss), mode="r+")["obs"]
+    write_elem(obs, "uuid", np.array([f"u{i}" for i in range(8)], dtype=object))
+    obs.attrs["column-order"] = [*obs.attrs["column-order"], "uuid"]
+    assert obs["uuid"].attrs["encoding-type"] == "string-array"
+    with pytest.raises(ConversionError, match="'uuid': the cells do not carry it, and a plain string-array"):
+        plan_append(str(ss), cells=str(tmp_path / "b.zarr"))
+
+
+def test_append_reconciles_nullable_obs_encodings(tmp_path: Path) -> None:
+    """Plain int/bool and their nullable encodings append onto each other; a plain store column that
+    must hold a missing value is promoted to its nullable form, with its values intact."""
+    a, b = _adata(n=6, seed=0), _adata(n=3, seed=1)
+    for x in (a, b):
+        x.obsm.clear()
+    a.obs["n"] = np.arange(6, dtype=np.int32)
+    b.obs["n"] = pd.array([7, None, 9], dtype="Int32")
+    a.obs["ok"] = pd.array([True, False] * 3, dtype="boolean")
+    b.obs["ok"] = np.array([True, True, False])
+    a.obs["keep"] = np.array([True] * 6)
+    b.obs["keep"] = pd.array([False, None, True], dtype="boolean")
+    a.obs["m"] = np.arange(6, dtype=np.int64)
+    b.obs["m"] = pd.array([1, 2, 3], dtype="Int64")
+    sa, sb = _store(tmp_path, a, "a.zarr"), _store(tmp_path, b, "b.zarr")
+    assert plan_append(str(sa), cells=str(sb)).obs_promoted == ("n", "keep")
+
+    append(str(sa), cells=str(sb), cfg=cfg())
+    assert_anndata_readable(sa)
+    obs = zarr.open_group(str(sa), mode="r")["obs"]
+    encodings = {k: obs[k].attrs["encoding-type"] for k in ("n", "keep", "m")}
+    assert encodings == {"n": "nullable-integer", "keep": "nullable-boolean", "m": "array"}
+    got = ad.read_zarr(str(sa)).obs
+    assert got["n"].dtype == "Int32" and list(got["n"]) == [0, 1, 2, 3, 4, 5, 7, pd.NA, 9]
+    assert list(got["ok"]) == [True, False] * 3 + [True, True, False]
+    assert list(got["keep"]) == [True] * 6 + [False, pd.NA, True]
+    assert list(got["m"]) == [0, 1, 2, 3, 4, 5, 1, 2, 3]

@@ -21,8 +21,8 @@ URI, or an [`az.Repo`](icechunk.md#a-repo-as-the-store), used as given with its 
 | `az.rechunk(store, *, output, matrix="X", cfg=None, branch=None, message=None)` | [rechunk](ops/rechunk.md) |
 | `az.sort(store, *, output, by, cfg=None, branch=None, message=None)` | [sort](ops/sort.md) |
 | `az.plan_append(store, *, cells)` | [append](ops/append.md) |
-| `az.append(store, *, cells, drop_derived=False, extend_layers=False, cfg=None, branch=None, message=None)` | [append](ops/append.md) |
-| `az.add_expr(store, *, layout="csc", layer="gexp", target_sum=1e4, overwrite=False, cfg=None, branch=None, message=None)` | [add-expr](ops/add-expr.md) |
+| `az.append(store, *, cells, drop_derived=False, extend_layers=False, include_new_obs=False, cfg=None, branch=None, message=None, commit=True)` | [append](ops/append.md) |
+| `az.add_expr(store, *, layout="csc", layer="gexp", target_sum=1e4, overwrite=False, cfg=None, branch=None, message=None, commit=True)` | [add-expr](ops/add-expr.md) |
 
 ## Configuration
 
