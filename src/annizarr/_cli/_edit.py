@@ -137,6 +137,12 @@ def add_append_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentPa
         "without it you are prompted",
     )
     p.add_argument(
+        "--include-new-obs",
+        action="store_true",
+        help="add obs columns only the cells carry, missing on the existing cells; default: leave them out "
+        "with a warning",
+    )
+    p.add_argument(
         "--extend-layers",
         action="store_true",
         help="extend eligible add-expr CSR layers in place instead of dropping them",
@@ -190,6 +196,7 @@ def _run_append(args: argparse.Namespace) -> int:
         cells=args.cells,
         drop_derived=drop_derived,
         extend_layers=args.extend_layers,
+        include_new_obs=args.include_new_obs,
         cfg=cfg,
         branch=args.branch,
         message=args.message,

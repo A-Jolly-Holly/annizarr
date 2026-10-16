@@ -8,21 +8,28 @@ from annizarr._core._config import AppConfig, resolve_backend_cfg
 from annizarr._core._layout import check_write_unit, dense_shards, write_grid
 from annizarr._core._runtime import configure_runtime, run_parallel, stage
 from annizarr._core._zarr import get_group, has_element, shape_attr
-from annizarr._storage import check_output_target, open_input_group, open_output_store, store_name
+from annizarr._storage import (
+    check_output_target,
+    op_metadata,
+    open_input_group,
+    open_output_store,
+    store_name,
+    store_path,
+)
 from annizarr._writers._encoding import sparse_shards, suppress_autoshard_warning
 from annizarr.errors import ConversionError
 from annizarr.ops._result import OpResult
 
 if TYPE_CHECKING:
-    from annizarr.typing import PathLike
+    from annizarr.typing import StoreLike
 
 _SMALL_ELEMS = ("obs", "var", "uns", "varm", "varp")
 
 
 def rechunk(
-    store: PathLike,
+    store: StoreLike,
     *,
-    output: PathLike,
+    output: StoreLike,
     matrix: str = "X",
     cfg: AppConfig | None = None,
     branch: str | None = None,
@@ -33,9 +40,9 @@ def rechunk(
     Parameters
     ----------
     store
-        Existing AnnData zarr (or Icechunk) store to read from.
+        Existing AnnData zarr store, or an Icechunk repo (path or :class:`~annizarr.ic.Repo`) to read from.
     output
-        Destination store path or URI.
+        Destination store path or URI, or a :class:`~annizarr.ic.Repo`.
     matrix
         Which matrix to rechunk: ``"X"``, ``"layers/<name>"``, or ``"raw/X"``.
     cfg
@@ -78,7 +85,12 @@ def rechunk(
     ad.settings.zarr_write_format = 3
     commit_message = message or f"annizarr rechunk {matrix} → {store_name(output)}"
     out = open_output_store(
-        output, cfg, commit_message=commit_message, branch=branch, expected_shape=_matrix_shape(src["X"])
+        output,
+        cfg,
+        commit_message=commit_message,
+        commit_metadata=op_metadata("rechunk", source=store_name(store)),
+        branch=branch,
+        expected_shape=_matrix_shape(src["X"]),
     )
     try:
         dst = out.root
@@ -132,7 +144,7 @@ def rechunk(
     except BaseException:
         out.abort()
         raise
-    return OpResult(path=str(output), n_obs=n_obs, n_vars=n_vars, snapshot_id=snapshot_id)
+    return OpResult(path=store_path(output), n_obs=n_obs, n_vars=n_vars, snapshot_id=snapshot_id)
 
 
 def _matrix_shape(node: Any) -> tuple[int, int]:

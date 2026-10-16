@@ -14,6 +14,7 @@ import pytest
 import zarr
 from anndata.io import read_elem, sparse_dataset
 
+import annizarr as az
 from annizarr._storage import open_input_group, open_output_store
 from annizarr.config import AppConfig, ChunkConfig, GroupingConfig, IOConfig
 from annizarr.errors import RepoError, StorageError
@@ -94,6 +95,8 @@ def test_lifecycle_is_one_commit_per_op(tmp_path: Path) -> None:
         and "annizarr add-expr csr" in log[2].message
         and "annizarr convert" in log[3].message
     )
+    assert log[1].metadata == {"annizarr": az.__version__, "op": "append", "cells": "b.zarr"}
+    assert log[3].metadata == {"annizarr": az.__version__, "op": "convert", "source": "a.h5ad"}
     sorted_log = Repo(str(sorted_path)).log(branch="main")
     assert (
         len(sorted_log) == 2 and sorted_log[0].id == r_sort.snapshot_id and "sort by cell_type" in sorted_log[0].message
@@ -193,6 +196,55 @@ def test_failed_convert_leaves_no_commit(tmp_path: Path, monkeypatch: pytest.Mon
     with pytest.raises(RuntimeError, match="boom"):
         convert_h5ad(str(h5), output=str(tmp_path / "repo.icechunk"), cfg=cfg(backend="icechunk"))
     assert [s.message for s in Repo(str(tmp_path / "repo.icechunk")).log(branch="main")] == ["Repository initialized"]
+
+
+@pytestmark_ic
+def test_a_repo_is_a_store(tmp_path: Path) -> None:
+    """A Repo is used as given: its branch receives the op, and a staged append is what a plan reads."""
+    from annizarr.ic import Repo
+    from annizarr.ops import plan_append
+
+    repo_path = tmp_path / "repo.icechunk"
+    convert_h5ad(
+        str(make_h5ad(tmp_path, adata=make_adata(n_obs=20, seed=0))), output=str(repo_path), cfg=cfg(backend="icechunk")
+    )
+    main_tip = Repo(str(repo_path)).log()[0].id
+    repo = Repo(str(repo_path))
+    repo.checkout("dev", create=True)
+    result = add_expr(repo, layout="csr", cfg=cfg())
+    assert result.path == str(repo_path) and repo.branch == "dev" and not repo.dirty
+    assert repo.log()[0].id == result.snapshot_id and Repo(str(repo_path)).log()[0].id == main_tip
+
+    cells = make_store(tmp_path, "b.zarr", adata=make_adata(n_obs=12, seed=1))
+    assert plan_append(repo, cells=str(cells)).extendable_layers == ("gexp",)
+    del repo.open_zarr("w")["layers/gexp"]
+    assert repo.dirty and plan_append(repo, cells=str(cells)).extendable_layers == ()
+
+
+@pytestmark_ic
+def test_deferred_ops_land_in_the_callers_commit(tmp_path: Path) -> None:
+    from annizarr.ic import Repo
+
+    repo_path = tmp_path / "repo.icechunk"
+    h5 = make_h5ad(tmp_path, adata=make_adata(n_obs=20, seed=0))
+    convert_h5ad(str(h5), output=str(repo_path), cfg=cfg(backend="icechunk"))
+    cells = make_store(tmp_path, "b.zarr", adata=make_adata(n_obs=12, seed=1))
+    repo = Repo(str(repo_path))
+    n_before = len(repo.log())
+    r_append = append(repo, cells=str(cells), drop_derived=True, cfg=cfg(), commit=False)
+    r_expr = add_expr(repo, layout="csr", cfg=cfg(), commit=False)
+    assert r_append.snapshot_id is None and r_expr.snapshot_id is None and repo.dirty
+    repo.commit("ingest", metadata={"run": "42"})
+    log = repo.log()
+    assert len(log) == n_before + 1 and log[0].metadata == {"run": "42"}
+    root = open_input_group(str(repo_path))
+    assert root["X"].attrs["shape"][0] == 32 and "gexp" in root["layers"]
+
+    with pytest.raises(StorageError, match="needs a Repo"):
+        add_expr(str(repo_path), cfg=cfg(), commit=False)
+    plain = make_store(tmp_path, "plain.zarr", adata=make_adata(n_obs=5, seed=2))
+    with pytest.raises(StorageError, match="only applies to Icechunk"):
+        add_expr(str(plain), cfg=cfg(), commit=False)
 
 
 @pytest.fixture

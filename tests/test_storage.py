@@ -10,8 +10,16 @@ from pathlib import Path
 
 import anndata as ad
 import pytest
+import zarr
 
-from annizarr._storage import bucket_prefix, canonical_location, is_icechunk_repo, is_readonly_path, open_output_store
+from annizarr._storage import (
+    bucket_prefix,
+    canonical_location,
+    is_icechunk_repo,
+    is_readonly_path,
+    open_output_store,
+    verify_store_shape,
+)
 from annizarr.config import AppConfig, IOConfig
 from annizarr.errors import ConversionError, StorageError
 from annizarr.ops import convert_h5ad, sort
@@ -121,3 +129,13 @@ def test_finalize_verifies_the_shape_and_is_idempotent(tmp_path: Path) -> None:
     assert out.finalize() is None and out.finalize() is None  # the second call is a no-op
     assert target.exists() and not list(tmp_path.glob("*.tmp-*"))
     assert "icechunk" not in sys.modules or True  # the plain path never needs the extra
+
+
+def test_verify_store_shape_catches_a_short_obs_column(tmp_path: Path) -> None:
+    root = zarr.open_group(str(make_store(tmp_path, adata=make_adata(n_obs=30, seed=0))), mode="r+")
+    verify_store_shape(root, n_obs=30, n_vars=50, nnz=int(root["X/indptr"][-1]))
+    with pytest.raises(StorageError, match="nonzeros"):
+        verify_store_shape(root, n_obs=30, n_vars=50, nnz=1)
+    root["obs/cell_type/codes"].resize((29,))
+    with pytest.raises(StorageError, match="obs/cell_type has 29 rows"):
+        verify_store_shape(root, n_obs=30, n_vars=50)

@@ -20,8 +20,16 @@ from annizarr._core._zarr import (
     str_attr,
     str_list_attr,
 )
-from annizarr._storage import open_input_group, open_store_rw, store_name
-from annizarr.errors import ConversionError
+from annizarr._storage import (
+    op_metadata,
+    open_input_group,
+    open_store_rw,
+    store_name,
+    store_path,
+    verify_store_shape,
+)
+from annizarr._writers._encoding import nullable_series, write_frame_column, write_settings
+from annizarr.errors import AnzError, ConversionError
 from annizarr.ops._expr import target_sum_attr
 from annizarr.ops._result import AppendPlan, OpResult
 
@@ -29,7 +37,7 @@ if TYPE_CHECKING:
     import pandas as pd
 
     from annizarr._sources._readers import Reader
-    from annizarr.typing import PathLike
+    from annizarr.typing import StoreLike
 
 logger = logging.getLogger(__name__)
 
@@ -37,19 +45,23 @@ _INDEX_SCAN_ROWS = 1 << 20
 _NULLABLE_ENCODINGS = ("nullable-integer", "nullable-boolean", "nullable-string-array")
 # mutually appendable: the store column keeps its encoding and the incoming values are converted
 _STRINGLIKE_ENCODINGS = ("categorical", "string-array", "nullable-string-array")
+_CODE_WIDTHS = (np.int8, np.int16, np.int32, np.int64)
+# a plain array of one of these kinds and its nullable encoding are one family: they append onto each other
+_NULLABLE_FAMILY = {"i": "nullable-integer", "u": "nullable-integer", "b": "nullable-boolean"}
 
 
-def plan_append(store: PathLike, *, cells: PathLike) -> AppendPlan:
+def plan_append(store: StoreLike, *, cells: StoreLike) -> AppendPlan:
     """Validate an append and describe what it would do, without mutating anything.
 
-    Reads metadata only (attrs, obs schema, small index/indptr arrays) from both stores.
+    Reads metadata only (attrs, obs schema, small index/indptr arrays, the cells' nullable masks) from both stores.
 
     Parameters
     ----------
     store
-        Existing AnnData zarr (or Icechunk) store the cells would be appended onto.
+        Existing AnnData zarr store, or an Icechunk repo (path or :class:`~annizarr.ic.Repo`), the cells
+        would be appended onto.
     cells
-        Another AnnData zarr store whose cells would be appended.
+        Another AnnData zarr (or Icechunk) store whose cells would be appended.
 
     Returns
     -------
@@ -61,8 +73,9 @@ def plan_append(store: PathLike, *, cells: PathLike) -> AppendPlan:
     ------
     ConversionError
         ``store``/``cells`` is not a CSR AnnData zarr store, ``var`` names/order
-        mismatch, obs schema mismatch, an X dtype mismatch, or every appended cell's
-        obs name is already present in the store (already appended?).
+        mismatch, a shared obs column's encoding or dtype mismatch, a plain string obs
+        column the cells lack, an X dtype mismatch, or every appended cell's obs name is
+        already present in the store (already appended?).
     """
     root = open_input_group(store)
     src = open_input_group(cells)
@@ -85,7 +98,7 @@ def plan_append(store: PathLike, *, cells: PathLike) -> AppendPlan:
     if len(var_t) != len(var_s) or not (var_t.index == var_s.index).all():
         raise ConversionError("var mismatch: names + order must be identical between stores.")
 
-    obs_notes = _check_obs_schema(get_group(root, "obs"), get_group(src, "obs"))
+    obs_notes, obs_extra, obs_filled, obs_promoted = _check_obs_schema(get_group(root, "obs"), get_group(src, "obs"))
 
     x_t, x_s = get_group(root, "X"), get_group(src, "X")
     data_t, data_s = get_array(x_t, "data"), get_array(x_s, "data")
@@ -130,22 +143,30 @@ def plan_append(store: PathLike, *, cells: PathLike) -> AppendPlan:
         extendable_layers=tuple(ext_layers),
         n_duplicate_names=n_duplicate_names,
         notes=tuple(notes),
+        obs_extra=obs_extra,
+        obs_filled=obs_filled,
+        obs_promoted=obs_promoted,
     )
 
 
 def append(
-    store: PathLike,
+    store: StoreLike,
     *,
-    cells: PathLike,
+    cells: StoreLike,
     drop_derived: bool = False,
     extend_layers: bool = False,
+    include_new_obs: bool = False,
     cfg: AppConfig | None = None,
     branch: str | None = None,
     message: str | None = None,
+    commit: bool = True,
 ) -> OpResult:
     """Append the cells of another zarr store onto this one, in place.
 
-    Extends X and obs only. Derived obs-aligned elements on the store (obsm embeddings,
+    Extends X and obs only. Obs columns are matched by name: one the cells lack gets missing
+    values on the appended rows, one only the cells carry is left out unless ``include_new_obs``,
+    and a plain int or bool store column is rewritten as nullable when it must hold a missing
+    value. Derived obs-aligned elements on the store (obsm embeddings,
     obsp graphs, layers) are invalidated by new cells; :func:`plan_append` is called first,
     and if it would drop anything this raises unless ``drop_derived=True`` (re-derive
     layers afterwards with :func:`~annizarr.ops._expr.add_expr`). With ``extend_layers``,
@@ -155,13 +176,15 @@ def append(
     Parameters
     ----------
     store
-        Existing AnnData zarr (or Icechunk) store to append onto, in place.
+        Existing AnnData zarr store, or an Icechunk repo (path or :class:`~annizarr.ic.Repo`) to append onto, in place.
     cells
-        Another AnnData zarr store whose cells are appended.
+        Another AnnData zarr (or Icechunk) store whose cells are appended.
     drop_derived
         Consent to dropping derived obs-aligned elements the plan says would drop.
     extend_layers
         Extend eligible add-expr CSR layers in place instead of dropping them.
+    include_new_obs
+        Add obs columns only the cells carry, with missing values on the existing cells.
     cfg
         Resolved configuration; ``None`` uses the :class:`~annizarr.config.AppConfig` defaults.
     branch
@@ -169,6 +192,9 @@ def append(
         Ignored for plain zarr.
     message
         Icechunk commit message; ``None`` names the op and the two stores involved.
+    commit
+        ``False`` stages the append without committing, so several ops land in one commit made
+        with ``store.commit()``. Requires ``store`` to be a :class:`~annizarr.ic.Repo`.
 
     Returns
     -------
@@ -204,7 +230,14 @@ def append(
     configure_runtime(cfg.chunks.cpus)
     src = open_input_group(cells)
     commit_message = message or f"annizarr append {store_name(cells)} → {store_name(store)}"
-    root, finalize = open_store_rw(store, cfg, commit_message=commit_message, branch=branch)
+    root, finalize = open_store_rw(
+        store,
+        cfg,
+        commit_message=commit_message,
+        commit_metadata=op_metadata("append", cells=store_name(cells)),
+        branch=branch,
+        commit=commit,
+    )
 
     x_t, x_s = get_group(root, "X"), get_group(src, "X")
     n_t, n_vars = shape_attr(x_t)
@@ -222,18 +255,21 @@ def append(
         if dropped:
             hint = "; re-derive layers with add-expr" if drop_layers else ""
             logger.warning("dropped " + ", ".join(dropped) + f" (invalidated by appended cells{hint}).")
-        _append_arrays(root, src, x_t, x_s, indptr_t, indptr_s, n_t, n_s, n_vars, cfg)
+        _append_arrays(root, src, x_t, x_s, indptr_t, indptr_s, n_t, n_s, n_vars, cfg, plan, include_new_obs)
+        if plan.obs_extra:
+            done = "added (missing on the existing cells)" if include_new_obs else "not appended"
+            logger.warning(f"obs columns {list(plan.obs_extra)} {done}.")
         if ext_layers:
             _extend_lognorm_layers(root, x_s, ext_layers, indptr_t, indptr_s, n_t + n_s, n_vars, cfg)
             logger.warning(
                 f"extended layers {ext_layers} in place (lognorm applied to the appended "
                 "cells at each layer's recorded target_sum)."
             )
-    except ConversionError:
+    except AnzError:
         raise
     except Exception as e:
         raise ConversionError(
-            f"append failed mid-mutation; {store} may be inconsistent "
+            f"append failed mid-mutation; {store_path(store)} may be inconsistent "
             f"(plain zarr cannot roll back — icechunk discards uncommitted changes): {e}"
         ) from e
 
@@ -243,33 +279,47 @@ def append(
             "(partial overlap with existing cells)."
         )
     logger.warning("appended cells break any sorted-store contiguity; re-run `annizarr sort` if the store was sorted.")
+    nnz = int(indptr_t[-1]) + int(indptr_s[-1])
+    verify_store_shape(root, n_obs=n_t + n_s, n_vars=n_vars, nnz=nnz, layers=ext_layers)
     snapshot_id = finalize()
-    return OpResult(path=str(store), n_obs=n_t + n_s, n_vars=n_vars, snapshot_id=snapshot_id)
+    return OpResult(path=store_path(store), n_obs=n_t + n_s, n_vars=n_vars, snapshot_id=snapshot_id)
 
 
-def _check_obs_schema(obs_t: zarr.Group, obs_s: zarr.Group) -> list[str]:
+def _check_obs_schema(
+    obs_t: zarr.Group, obs_s: zarr.Group
+) -> tuple[list[str], tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+    # (notes, extra, filled, promoted): every obs decision append acts on is made here, once
     cols_t = str_list_attr(obs_t, "column-order")
     cols_s = str_list_attr(obs_s, "column-order")
-    if cols_t != cols_s:
-        raise ConversionError(f"obs schema mismatch: store {cols_t} vs cells {cols_s}.")
     for g, label, cols in ((obs_t, "store", cols_t), (obs_s, "cells", cols_s)):
         stray = sorted(set(g) - set(cols) - {str_attr(g, "_index")})
         if stray:
             raise ConversionError(f"obs in {label} has elements outside column-order: {stray}.")
 
+    extra = tuple(c for c in cols_s if c not in cols_t)
+    filled = tuple(c for c in cols_t if c not in cols_s)
+    promoted: list[str] = [c for c in filled if _fill_needs_promotion(obs_t[c], c)]
     notes: list[str] = []
-    pairs = [(c, obs_t[c], obs_s[c]) for c in cols_t]
+    pairs = [(c, obs_t[c], obs_s[c]) for c in cols_t if c in cols_s]
     pairs.append(("<index>", obs_t[str_attr(obs_t, "_index")], obs_s[str_attr(obs_s, "_index")]))
     for name, t, s in pairs:
         enc, enc_s = t.attrs.get("encoding-type"), s.attrs.get("encoding-type")
         stringlike = enc in _STRINGLIKE_ENCODINGS and enc_s in _STRINGLIKE_ENCODINGS
+        family = _family(t)
+        if enc != enc_s and family is not None and family == _family(s):
+            if _values(t).dtype != _values(s).dtype:
+                raise ConversionError(f"obs column '{name}' dtype mismatch ({_values(t).dtype} vs {_values(s).dtype}).")
+            if isinstance(t, zarr.Array) and bool(np.asarray(get_array(as_group(s), "mask")[:]).any()):
+                promoted.append(name)
+            continue
         if enc != enc_s and not stringlike:
             raise ConversionError(
                 f"obs column '{name}' encoding mismatch ({enc!r} vs {enc_s!r}); reconcile before append."
             )
         if enc == "categorical":
             t_grp = as_group(t)
-            cat_t = np.asarray(get_array(t_grp, "categories")[:]).tolist()
+            cats_arr = get_array(t_grp, "categories")
+            cat_t = np.asarray(cats_arr[:]).tolist()
             if bool(t_grp.attrs.get("ordered", False)):
                 # ordered categories carry meaning in their order, so they must match exactly
                 s_grp = as_group(s) if enc_s == "categorical" else None
@@ -283,10 +333,12 @@ def _check_obs_schema(obs_t: zarr.Group, obs_s: zarr.Group) -> list[str]:
             else:
                 new = _new_categories(cat_t, _stringlike_labels(s))
                 if new:
-                    _check_category_room(t_grp, len(cat_t) + len(new), new, name)
+                    codes_arr = get_array(t_grp, "codes")
+                    want = _codes_dtype(cats_arr, codes_arr, len(cat_t) + len(new), new, name)
                     shown = ", ".join(map(str, new[:5])) + (", …" if len(new) > 5 else "")
                     plural = "y" if len(new) == 1 else "ies"
-                    notes.append(f"obs column '{name}': {len(new)} new categor{plural} appended ({shown}).")
+                    widen = f"; codes widen {codes_arr.dtype} → {want}" if want != codes_arr.dtype else ""
+                    notes.append(f"obs column '{name}': {len(new)} new categor{plural} appended ({shown}){widen}.")
         elif enc == "string-array" and enc_s != "string-array":
             if any(label is None for label in _stringlike_labels(s)):
                 raise ConversionError(
@@ -306,7 +358,42 @@ def _check_obs_schema(obs_t: zarr.Group, obs_s: zarr.Group) -> list[str]:
                 )
         elif not stringlike:
             raise ConversionError(f"obs column '{name}': unsupported encoding {enc!r} for in-place append.")
-    return notes
+
+    if extra:
+        notes.append(f"obs columns in the cells, not in the store: {list(extra)}; include_new_obs adds them.")
+    if filled:
+        notes.append(f"obs columns in the store, not in the cells: {list(filled)}; appended cells get missing values.")
+    if promoted:
+        shown = ", ".join(f"'{c}' → {_family(obs_t[c])}" for c in promoted)
+        notes.append(f"obs columns rewritten as nullable to hold missing values: {shown}.")
+    return notes, extra, filled, tuple(promoted)
+
+
+def _family(node: Any) -> str | None:
+    # the nullable encoding a column shares a family with, None when it has none
+    if isinstance(node, zarr.Array):
+        return _NULLABLE_FAMILY.get(node.dtype.kind) if node.attrs.get("encoding-type") == "array" else None
+    enc = node.attrs.get("encoding-type")
+    return enc if enc in _NULLABLE_FAMILY.values() else None
+
+
+def _values(node: Any) -> zarr.Array[Any]:
+    return node if isinstance(node, zarr.Array) else get_array(as_group(node), "values")
+
+
+def _fill_needs_promotion(node: Any, name: str) -> bool:
+    # whether a store column the cells lack must be rewritten as nullable to hold their missing values
+    enc = node.attrs.get("encoding-type")
+    if enc == "string-array":
+        raise ConversionError(
+            f"obs column '{name}': the cells do not carry it, and a plain string-array holds no missing values. "
+            "Add the column to the cells store. (A future release may instead rewrite the column as nullable.)"
+        )
+    if _family(node) is not None:
+        return isinstance(node, zarr.Array)
+    if enc in ("categorical", *_NULLABLE_ENCODINGS) or (enc == "array" and as_array(node).dtype.kind == "f"):
+        return False
+    raise ConversionError(f"obs column '{name}': the cells do not carry it, and {enc!r} holds no missing values.")
 
 
 def _stringlike_labels(node: Any) -> np.ndarray[Any, Any]:
@@ -331,15 +418,16 @@ def _new_categories(categories: list[Any], labels: np.ndarray[Any, Any]) -> list
     return [label for label in pd.unique(labels) if label is not None and label not in known]
 
 
-def _check_category_room(t_grp: zarr.Group, n_categories: int, new: list[Any], name: str) -> None:
-    cats_arr, codes_arr = get_array(t_grp, "categories"), get_array(t_grp, "codes")
+def _codes_dtype(cats_arr: Any, codes_arr: Any, n_categories: int, new: list[Any], name: str) -> np.dtype[Any]:
+    # the stored code dtype, or the narrowest wider one that holds n_categories; -1 is missing, so signed
     if cats_arr.dtype.kind in "iufb":
         raise ConversionError(f"obs column '{name}': categories are {cats_arr.dtype}, cannot add {new[:5]}.")
-    if n_categories - 1 > np.iinfo(codes_arr.dtype).max:
-        raise ConversionError(
-            f"obs column '{name}': {n_categories} categories exceed its {codes_arr.dtype} code width; "
-            "rewrite the store with wider codes before appending."
-        )
+    current: np.dtype[Any] = codes_arr.dtype
+    if current.kind != "i":
+        raise ConversionError(f"obs column '{name}': codes are {current}, expected signed integers.")
+    if n_categories - 1 <= np.iinfo(current).max:
+        return current
+    return next(np.dtype(w) for w in _CODE_WIDTHS if np.iinfo(w).max >= n_categories - 1)
 
 
 def _index_values(obs: zarr.Group) -> zarr.Array[Any]:
@@ -388,6 +476,8 @@ def _append_arrays(
     n_s: int,
     n_vars: int,
     cfg: AppConfig,
+    plan: AppendPlan,
+    include_new_obs: bool,
 ) -> None:
     nnz_t, nnz_s = int(indptr_t[-1]), int(indptr_s[-1])
     n_new = n_t + n_s
@@ -398,8 +488,8 @@ def _append_arrays(
         _rewrite_indptr(x_t, indptr_t, indptr_s, n_new)
         x_t.attrs["shape"] = [n_new, n_vars]
 
-    with stage(f"Appending obs ({n_s} cells)"):
-        _append_obs(root["obs"], src["obs"], n_t, n_new)
+    with stage(f"Appending obs ({n_s} cells)"), write_settings(cfg.chunks.auto_shard):
+        _append_obs(root["obs"], src["obs"], n_t, n_new, plan, include_new_obs)
 
 
 def _extend_flat(dst_a: Any, src_a: Any, off: int, n_src: int, cpus: int) -> None:
@@ -480,27 +570,68 @@ class _FlatValues:
         return self._reader.flat_data(item.start or 0, item.stop)
 
 
-def _append_obs(obs_t: Any, obs_s: Any, n_t: int, n_new: int) -> None:
-    pairs = [(c, c) for c in obs_t.attrs["column-order"]]
-    pairs.append((obs_t.attrs["_index"], obs_s.attrs["_index"]))
-    for name_t, name_s in pairs:
-        t, s = obs_t[name_t], obs_s[name_s]
-        enc, enc_s = t.attrs.get("encoding-type"), s.attrs.get("encoding-type")
-        if enc == "categorical":
-            _extend_categorical(t, _stringlike_labels(s), n_t, n_new, name_t)
-        elif isinstance(t, zarr.Array):
-            if isinstance(s, zarr.Array):
-                _extend_1d(t, s[:], n_t, n_new)
-            else:  # string-array target fed from a categorical / nullable column (no missing values: checked in plan)
-                _extend_1d(t, np.asarray(_stringlike_labels(s), dtype=str), n_t, n_new)
-        elif enc == "nullable-string-array" and enc_s != enc:
-            labels = _stringlike_labels(s)
-            missing = np.fromiter((label is None for label in labels), dtype=bool, count=len(labels))
-            _extend_1d(t["values"], np.asarray(np.where(missing, "", labels), dtype=str), n_t, n_new)
-            _extend_1d(t["mask"], missing, n_t, n_new)
-        else:  # nullable-*: values + mask
-            _extend_1d(t["values"], s["values"][:], n_t, n_new)
-            _extend_1d(t["mask"], s["mask"][:], n_t, n_new)
+def _append_obs(obs_t: Any, obs_s: Any, n_t: int, n_new: int, plan: AppendPlan, include_new_obs: bool) -> None:
+    for name in str_list_attr(obs_t, "column-order"):
+        if name in plan.obs_promoted:
+            incoming = None if name in plan.obs_filled else obs_s[name]
+            write_frame_column(obs_t, name, _full_height(obs_t[name], incoming, n_t, n_new))
+        elif name in plan.obs_filled:
+            _fill_missing(obs_t[name], n_t, n_new)
+        else:
+            _extend_column(obs_t[name], obs_s[name], n_t, n_new, name)
+    index_t = str_attr(obs_t, "_index")
+    _extend_column(obs_t[index_t], obs_s[str_attr(obs_s, "_index")], n_t, n_new, index_t)
+    if include_new_obs:
+        for name in plan.obs_extra:
+            write_frame_column(obs_t, name, _full_height(None, obs_s[name], n_t, n_new))
+
+
+def _extend_column(t: Any, s: Any, n_t: int, n_new: int, name: str) -> None:
+    enc, enc_s = t.attrs.get("encoding-type"), s.attrs.get("encoding-type")
+    if enc == "categorical":
+        _extend_categorical(t, _stringlike_labels(s), n_t, n_new, name)
+    elif isinstance(t, zarr.Array):
+        if isinstance(s, zarr.Array):
+            _extend_1d(t, s[:], n_t, n_new)
+        elif enc_s in _NULLABLE_FAMILY.values():  # no missing values: a column that has them was promoted
+            _extend_1d(t, s["values"][:], n_t, n_new)
+        else:  # string-array target fed from a categorical / nullable column (no missing values: checked in plan)
+            _extend_1d(t, np.asarray(_stringlike_labels(s), dtype=str), n_t, n_new)
+    elif enc == "nullable-string-array" and enc_s != enc:
+        labels = _stringlike_labels(s)
+        missing = np.fromiter((label is None for label in labels), dtype=bool, count=len(labels))
+        _extend_1d(t["values"], np.asarray(np.where(missing, "", labels), dtype=str), n_t, n_new)
+        _extend_1d(t["mask"], missing, n_t, n_new)
+    elif isinstance(s, zarr.Array):  # nullable-integer/boolean store fed a plain column of its family
+        _extend_1d(t["values"], s[:], n_t, n_new)
+        _extend_1d(t["mask"], np.zeros(n_new - n_t, dtype=bool), n_t, n_new)
+    else:  # nullable-*: values + mask
+        _extend_1d(t["values"], s["values"][:], n_t, n_new)
+        _extend_1d(t["mask"], s["mask"][:], n_t, n_new)
+
+
+def _fill_missing(t: Any, n_t: int, n_new: int) -> None:
+    # a store column the cells lack, in an encoding that holds missing values (checked in plan)
+    n = n_new - n_t
+    if t.attrs.get("encoding-type") == "categorical":
+        _extend_1d(t["codes"], np.full(n, -1), n_t, n_new)
+    elif isinstance(t, zarr.Array):
+        _extend_1d(t, np.full(n, np.nan), n_t, n_new)
+    else:
+        values = t["values"]
+        filler = np.zeros(n, dtype=values.dtype) if values.dtype.kind in "iufb" else np.full(n, "", dtype=str)
+        _extend_1d(values, filler, n_t, n_new)
+        _extend_1d(t["mask"], np.ones(n, dtype=bool), n_t, n_new)
+
+
+def _full_height(t: Any, s: Any, n_t: int, n_new: int) -> pd.Series[Any]:
+    # the store's values (if any) over the incoming ones (if any), missing wherever neither reaches
+    import pandas as pd
+
+    parts = [] if t is None else [nullable_series(read_elem(t))]
+    if s is not None:
+        parts.append(nullable_series(read_elem(s)).set_axis(range(n_t, n_new)))
+    return pd.concat(parts).reindex(range(n_new))
 
 
 def _extend_categorical(t: Any, labels: np.ndarray[Any, Any], n_t: int, n_new: int, name: str) -> None:
@@ -512,11 +643,32 @@ def _extend_categorical(t: Any, labels: np.ndarray[Any, Any], n_t: int, n_new: i
     cats = np.asarray(cats_arr[:]).tolist()
     new = _new_categories(cats, labels)
     if new:
-        _check_category_room(t, len(cats) + len(new), new, name)
+        want = _codes_dtype(cats_arr, codes_arr, len(cats) + len(new), new, name)
         cats_arr.resize((len(cats) + len(new),))
         cats_arr[len(cats) :] = np.asarray(new, dtype=str)
+        if want != codes_arr.dtype:
+            codes_arr = _widen_codes(t, codes_arr, want, n_t)
     codes = pd.Categorical(labels, categories=[*cats, *new]).codes  # -1 where the label is None
     _extend_1d(codes_arr, codes, n_t, n_new)
+
+
+def _widen_codes(t: Any, codes_arr: Any, dtype: np.dtype[Any], n_t: int) -> Any:
+    # zarr cannot change an array's dtype, so the codes are rewritten into a replacement at the same path
+    # (the serializer is left automatic: a narrow array's carries no endianness, which a wide one needs)
+    existing = codes_arr[:n_t]
+    wide = t.create_array(
+        "codes",
+        shape=codes_arr.shape,
+        dtype=dtype,
+        chunks=codes_arr.chunks,
+        shards=codes_arr.shards,
+        fill_value=codes_arr.fill_value,
+        compressors=codes_arr.compressors,
+        attributes=dict(codes_arr.attrs),
+        overwrite=True,
+    )
+    wide[:n_t] = existing.astype(dtype)
+    return wide
 
 
 def _extend_1d(dst: Any, vals: Any, n_t: int, n_new: int) -> None:

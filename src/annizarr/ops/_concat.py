@@ -9,7 +9,7 @@ from annizarr._core._runtime import configure_runtime, stage
 from annizarr._core._validation import require_matrix
 from annizarr._sources import open_source
 from annizarr._sources._readers import ConcatReader, as_reader
-from annizarr._storage import check_output_target, open_output_store, store_name
+from annizarr._storage import check_output_target, op_metadata, open_output_store, store_name, store_path
 from annizarr._writers import write_matrix
 from annizarr._writers._encoding import set_anndata_root_attrs, write_elem, write_frame, write_settings
 from annizarr._writers._sparse import _local_tmp_dir
@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 
     from annizarr._sources._base import Source
     from annizarr._sources._readers import Reader
-    from annizarr.typing import PathLike
+    from annizarr.typing import PathLike, StoreLike
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 def concat(
     paths: Sequence[PathLike],
     *,
-    output: PathLike,
+    output: StoreLike,
     cfg: AppConfig | None = None,
     branch: str | None = None,
     message: str | None = None,
@@ -150,7 +150,12 @@ def concat(
 
         commit_message = message or f"annizarr concat → {store_name(output_path)}"
         out = open_output_store(
-            output_path, cfg, commit_message=commit_message, branch=branch, expected_shape=(n_obs_total, n_vars)
+            output_path,
+            cfg,
+            commit_message=commit_message,
+            commit_metadata=op_metadata("concat", source=[store_name(p) for p in paths]),
+            branch=branch,
+            expected_shape=(n_obs_total, n_vars),
         )
         readers: list[Reader] = []
         try:
@@ -184,7 +189,7 @@ def concat(
             out.abort()
             raise
         logger.info(f"Done in {time.perf_counter() - t0:.1f}s")
-        return OpResult(path=str(output_path), n_obs=n_obs_total, n_vars=n_vars, snapshot_id=snapshot_id)
+        return OpResult(path=store_path(output_path), n_obs=n_obs_total, n_vars=n_vars, snapshot_id=snapshot_id)
 
     except AnzError:
         raise
