@@ -3,11 +3,14 @@ from __future__ import annotations
 import os
 import shutil
 from pathlib import Path
-from typing import TypeIs
+from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
 from annizarr.errors import StorageError
 from annizarr.typing import PathLike, StoreLike
+
+if TYPE_CHECKING:
+    from typing_extensions import TypeIs  # typing.TypeIs is 3.13+, the floor is 3.12
 
 _REMOTE_SCHEMES = frozenset({"s3", "gs", "gcs"})
 
