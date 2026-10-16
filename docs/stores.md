@@ -15,8 +15,12 @@ writes the `encoding-type` / `encoding-version` attrs itself to match anndata's 
 obs, var, uns, obsm, varm, obsp and varp go through anndata's own `write_elem`, so anything anndata
 can write round-trips, spatial coordinates and images included. Before writing, obs and var get the
 same treatment anndata's own writers apply: string columns with repeated values become categoricals
-(unique-per-row strings such as barcodes stay string arrays), and the index is always a plain
-`string-array`, even on pandas 3 where anndata would otherwise emit a nullable-string group.
+(unique-per-row strings such as barcodes stay string arrays), and the index and every column that
+stays a string are coerced to pandas 3's `str` dtype, so they are written as `nullable-string-array`
+whichever pandas or anndata is installed -- byte for byte what `AnnData.write_zarr` produces on pandas
+3 (anndata 0.12 omits the `na-value` attribute that makes them read back as `str`; annizarr fills it
+in, and `rechunk` adds it to stores that lack it). Stores written by earlier versions, whose index is a
+plain `string-array`, are still read and appended to.
 
 ## Inputs
 

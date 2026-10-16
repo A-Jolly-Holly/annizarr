@@ -58,7 +58,7 @@ def rechunk(
     import anndata as ad
     from anndata.io import read_elem
 
-    from annizarr._writers._encoding import autoshard_setting, write_elem
+    from annizarr._writers._encoding import write_elem, write_frame, write_settings
 
     if cfg is None:
         cfg = AppConfig()
@@ -84,10 +84,14 @@ def rechunk(
         dst = out.root
         dst.attrs.update(dict(src.attrs))
 
-        with autoshard_setting(cfg.chunks.auto_shard):
+        with write_settings(cfg.chunks.auto_shard):
             with stage("Copying metadata elements"):
                 for key in _SMALL_ELEMS:
-                    if key in src:
+                    if key not in src:
+                        continue
+                    if key in ("obs", "var"):  # re-laid out: a 0.12-written index reads back as pd.NA strings
+                        write_frame(dst, key, read_elem(src[key]))
+                    else:
                         write_elem(dst, key, read_elem(src[key]))
                 for key in ("obsm", "obsp"):
                     if key not in src:
@@ -108,9 +112,10 @@ def rechunk(
                     src_raw = get_group(src, "raw")
                     raw = dst.require_group("raw")
                     raw.attrs.update(dict(src_raw.attrs))
-                    for key in ("var", "varm"):
-                        if key in src_raw:
-                            write_elem(raw, key, read_elem(src_raw[key]))
+                    if "var" in src_raw:
+                        write_frame(raw, "var", read_elem(src_raw["var"]))
+                    if "varm" in src_raw:
+                        write_elem(raw, "varm", read_elem(src_raw["varm"]))
 
             if "layers" in src:
                 src_layers = get_group(src, "layers")

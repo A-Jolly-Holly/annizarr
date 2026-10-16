@@ -202,8 +202,8 @@ def test_lazy_reads_backed_and_cleans_up_the_csc_temp_store(tmp_path: Path) -> N
 
 
 def test_frames_are_written_the_way_anndata_writes_them(tmp_path: Path) -> None:
-    """A string-dtype index becomes a plain string array; repeated strings become categoricals,
-    unique ones stay strings; the caller's frame is untouched."""
+    """The index and unique strings become nullable string arrays; repeated strings become
+    categoricals; the caller's frame is untouched."""
     obs = pd.DataFrame(
         {"batch": ["b2", "b1", "b2", "b1"], "barcode": ["AAA", "CCC", "GGG", "TTT"]},
         index=pd.Index([f"c{i}" for i in range(4)], dtype="string"),
@@ -211,7 +211,7 @@ def test_frames_are_written_the_way_anndata_writes_them(tmp_path: Path) -> None:
     adata = ad.AnnData(X=sp.csr_matrix(np.ones((4, 2), dtype=np.float32)), obs=obs)
     convert_adata(adata, output=str(tmp_path / "out.zarr"), cfg=cfg())
     root = zarr.open_group(str(tmp_path / "out.zarr"), mode="r")
-    assert isinstance(root["obs/_index"], zarr.Array) and root["obs/_index"].attrs["encoding-type"] == "string-array"
+    assert root["obs/_index"].attrs["encoding-type"] == "nullable-string-array"
     assert root["obs/batch"].attrs["encoding-type"] == "categorical"
     assert [str(c) for c in root["obs/batch/categories"][:]] == ["b1", "b2"]
     assert root["obs/barcode"].attrs["encoding-type"] != "categorical"

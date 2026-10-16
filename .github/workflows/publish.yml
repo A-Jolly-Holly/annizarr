@@ -1,16 +1,10 @@
-# Manual publish for the annizarr package. workflow_dispatch only for now;
-# switch to `push: tags: ['v*']` after the first release lands.
+# Tag-driven publish: pushing vX.Y.Z builds the wheel and uploads it to PyPI. The GitHub release is
+# cut by hand afterwards with ./Release_run.sh, since Release_notes.md is not in the repository.
 name: annizarr-publish
 
 on:
   push:
     tags: ['v*']
-  workflow_dispatch:
-    inputs:
-      test_pypi:
-        description: 'Publish to TestPyPI instead of PyPI'
-        type: boolean
-        default: true
 
 jobs:
   publish:
@@ -27,19 +21,16 @@ jobs:
 
       - run: pip install build twine
 
+      - name: Tag matches the packaged version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(grep -oE '"[^"]+"' src/annizarr/_version.py | tr -d '"')"
+          [ "$tag" = "$pkg" ] || { echo "tag $tag != _version.py $pkg"; exit 1; }
+
       - run: python -m build
 
       - run: twine check dist/*
 
-      - name: Publish to TestPyPI
-        if: ${{ inputs.test_pypi }}
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          repository-url: https://test.pypi.org/legacy/
-          packages-dir: dist/
-
-      - name: Publish to PyPI
-        if: ${{ !inputs.test_pypi }}
-        uses: pypa/gh-action-pypi-publish@release/v1
+      - uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist/
