@@ -11,7 +11,7 @@ from annizarr._core._config import AppConfig
 from annizarr._core._runtime import configure_runtime, map_parallel, stage
 from annizarr._core._zarr import get_group, shape_attr
 from annizarr._sources._readers import ScaledReader, as_reader
-from annizarr._storage import open_store_rw
+from annizarr._storage import op_metadata, open_store_rw, store_path
 from annizarr._writers._matrix import write_matrix
 from annizarr._writers._sparse import _local_tmp_dir
 from annizarr.errors import ConversionError
@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 
     from annizarr._core._config import ChunkConfig
     from annizarr._sources._readers import Reader
-    from annizarr.typing import Layout, PathLike
+    from annizarr.typing import Layout, StoreLike
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +39,7 @@ def target_sum_attr(attrs: Any) -> float | None:
 
 
 def add_expr(
-    store: PathLike,
+    store: StoreLike,
     *,
     layout: Layout = "csc",
     layer: str = "gexp",
@@ -48,13 +48,14 @@ def add_expr(
     cfg: AppConfig | None = None,
     branch: str | None = None,
     message: str | None = None,
+    commit: bool = True,
 ) -> OpResult:
     """Add a log-normalized expression layer (``layers/<layer>``) derived from CSR X.
 
     Parameters
     ----------
     store
-        Existing AnnData zarr (or Icechunk) store to update, in place.
+        Existing AnnData zarr store, or an Icechunk repo (path or :class:`~annizarr.ic.Repo`) to update, in place.
     layout
         On-disk layout of the new layer: ``"csr"``, ``"csc"``, or ``"dense"``. Chunking
         follows ``cfg.chunks`` the way X's does on convert: ``row_chunk`` (csr), ``col_chunk``
@@ -72,6 +73,9 @@ def add_expr(
         Ignored for plain zarr.
     message
         Icechunk commit message; ``None`` names the op, ``layout``, and the layer.
+    commit
+        ``False`` stages the layer without committing, so several ops land in one commit made
+        with ``store.commit()``. Requires ``store`` to be a :class:`~annizarr.ic.Repo`.
 
     Returns
     -------
@@ -87,11 +91,18 @@ def add_expr(
         cfg = AppConfig()
     configure_runtime(cfg.chunks.cpus)
     commit_message = message or f"annizarr add-expr {layout} → layers/{layer}"
-    root, finalize = open_store_rw(store, cfg, commit_message=commit_message, branch=branch)
+    root, finalize = open_store_rw(
+        store,
+        cfg,
+        commit_message=commit_message,
+        commit_metadata=op_metadata("add-expr", layout=layout),
+        branch=branch,
+        commit=commit,
+    )
     write_expr_layer(root, cfg, layout=layout, layer=layer, target_sum=target_sum, overwrite=overwrite)
     n_obs, n_vars = shape_attr(get_group(root, "X"))
     snapshot_id = finalize()
-    return OpResult(path=str(store), n_obs=n_obs, n_vars=n_vars, snapshot_id=snapshot_id)
+    return OpResult(path=store_path(store), n_obs=n_obs, n_vars=n_vars, snapshot_id=snapshot_id)
 
 
 def write_expr_layer(

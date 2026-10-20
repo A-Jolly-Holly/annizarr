@@ -115,7 +115,7 @@ class Repo:
             lines.append(f"  tip:    {fmt_snapshot(tip)}")
         if self.resolved:
             lines.append(f"  writes: {self.origin}")
-        if self._dirty:
+        if self.dirty:
             lines.append("  staged: uncommitted changes")
         return "\n".join(lines)
 
@@ -193,6 +193,11 @@ class Repo:
     def branch(self) -> str:
         """Name of the current branch."""
         return self._branch
+
+    @property
+    def dirty(self) -> bool:
+        """True when the open writable session holds uncommitted changes."""
+        return self._session is not None and not self._session.read_only and self._session.has_uncommitted_changes
 
     def branches(self) -> Branches:
         """Sorted branch names (a list); shown one per line, ``*`` on the current branch."""
@@ -329,10 +334,6 @@ class Repo:
         # repository used for reads: the origin once opened (authoritative), else path
         return self._writer if self._writer is not None else self._reader
 
-    @property
-    def _dirty(self) -> bool:
-        return self._session is not None and not self._session.read_only and self._session.has_uncommitted_changes
-
     def _writer_repo(self) -> Any:
         # repository at the writable origin, opened on first use
         if self._writer is not None:
@@ -365,5 +366,5 @@ class Repo:
         return False
 
     def _reject_uncommitted(self) -> None:
-        if self._dirty:
+        if self.dirty:
             raise RepoError(f"Uncommitted changes on '{self._branch}': commit() or discard() first")

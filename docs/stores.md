@@ -81,6 +81,9 @@ Remote targets (`s3://`, `gs://`) require Icechunk; credentials come from the en
   script. `--extend-layers` extends add-expr CSR layers in place instead of dropping them. Obs
   columns keep the store's encoding: a categorical column gains new categories for values it has
   not seen and re-codes incoming strings or differently coded categoricals against them (ordered
-  categoricals must match exactly); a plain string column accepts categorical cells as strings.
+  categoricals must match exactly); a plain string column accepts categorical cells as strings. A
+  categorical that outgrows the code width it was written with has its codes array rewritten at the
+  next signed width. Obs columns are matched by name: one the cells lack gets missing values on the
+  appended rows, one only the cells carry is left out unless `--include-new-obs`.
 - `sort` re-derives a lone `layers/gexp` on the sorted output with the layer's own layout and
   chunking.

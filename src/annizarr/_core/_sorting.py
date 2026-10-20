@@ -15,7 +15,7 @@ from annizarr._core import _layout
 from annizarr._core._runtime import configure_runtime, run_parallel, stage
 from annizarr._core._validation import require_matrix
 from annizarr._sources._readers import ConcatReader, CSRFileReader, as_reader
-from annizarr._storage import open_output_store
+from annizarr._storage import open_output_store, store_name, store_path
 from annizarr._writers._buckets import Buckets
 from annizarr._writers._encoding import write_elem, write_frame, write_settings
 from annizarr._writers._matrix import write_matrix
@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 
     from annizarr._core._config import AppConfig
     from annizarr._sources._readers import Reader
+    from annizarr.typing import StoreLike
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +81,13 @@ def maybe_sort_adata(adata: ad.AnnData, cfg: AppConfig) -> ad.AnnData:
 
 
 def _write_sorted_lazy(
-    adata: ad.AnnData, output_path: Path, cfg: AppConfig, *, branch: str | None = None, message: str | None = None
+    adata: ad.AnnData,
+    output_path: StoreLike,
+    cfg: AppConfig,
+    *,
+    branch: str | None = None,
+    message: str | None = None,
+    commit_metadata: dict[str, Any] | None = None,
 ) -> str | None:
     # streams X into temp per-group CSR stores (peak RAM one row-batch), unlike
     # maybe_sort_adata's adata[perm].copy() (~2x X in RAM).
@@ -115,7 +122,8 @@ def _write_sorted_lazy(
         output_path,
         cfg,
         sort_by=sort_by,
-        commit_message=message or f"annizarr convert (sorted by {','.join(sort_by)}) → {output_path.name}",
+        commit_message=message or f"annizarr convert (sorted by {','.join(sort_by)}) → {store_name(output_path)}",
+        commit_metadata=commit_metadata,
         branch=branch,
     )
     return snapshot_id
@@ -159,11 +167,12 @@ def stream_sorted_store(
     obsm: dict[str, Any],
     varm: dict[str, Any],
     varp: dict[str, Any],
-    output_path: Path,
+    output_path: StoreLike,
     cfg: AppConfig,
     *,
     sort_by: tuple[str, ...],
     commit_message: str | None = None,
+    commit_metadata: dict[str, Any] | None = None,
     branch: str | None = None,
     after_write: Callable[[zarr.Group], None] | None = None,
 ) -> str | None:
@@ -205,7 +214,7 @@ def stream_sorted_store(
     buckets = Buckets.create(
         n_groups,
         {"data": np.dtype(x_dtype), "indices": np.dtype(indices_dtype)},
-        dir=str(output_path.parent),
+        dir=str(Path(store_path(output_path)).parent),
         prefix="annizarr_sort_",
         sizes=nnz_each,
     )
@@ -237,7 +246,8 @@ def stream_sorted_store(
         out = open_output_store(
             output_path,
             cfg,
-            commit_message=commit_message or f"annizarr sort → {output_path.name}",
+            commit_message=commit_message or f"annizarr sort → {store_name(output_path)}",
+            commit_metadata=commit_metadata,
             branch=branch,
             expected_shape=(n_obs, n_vars),
         )

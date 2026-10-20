@@ -46,4 +46,5 @@ az.add_expr("sample.zarr", layout="csr", layer="lognorm", target_sum=1e4, overwr
 - Records the target sum on the layer. That is what lets `append --extend-layers` extend the layer and
   `sort` re-derive it on a sorted store.
 - On Icechunk the layer is one commit on `--branch`; an existing repository is detected without
-  `--ic`.
+  `--ic`. With a `Repo` and `commit=False` the layer is staged for a commit you make yourself; see
+  [batching ops into one commit](../icechunk.md#batching-ops-into-one-commit).

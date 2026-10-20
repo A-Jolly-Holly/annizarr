@@ -4,9 +4,13 @@ import warnings
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
 import pandas as pd
 from anndata._io.specs import write_elem  # private API; checked against anndata 0.12.7 through 0.13.4
+from pandas.api.extensions import ExtensionDtype
 from pandas.api.types import infer_dtype
+
+from annizarr._core._zarr import str_list_attr
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -15,11 +19,14 @@ if TYPE_CHECKING:
 
 __all__ = [
     "mark_nullable_strings",
+    "nullable_series",
+    "prepare_column",
     "prepare_frame",
     "sparse_shards",
     "suppress_autoshard_warning",
     "write_elem",
     "write_frame",
+    "write_frame_column",
     "write_settings",
 ]
 
@@ -47,16 +54,33 @@ def prepare_frame(df: pd.DataFrame) -> pd.DataFrame:
     on pandas>=3; :func:`write_frame` keeps it so on every anndata version. The caller's frame is
     left untouched.
     """
-    import anndata as ad
-
     out = df.copy(deep=False)
     if _is_string_like(out.index):
         out.index = out.index.astype(STRING_DTYPE)
-    ad.AnnData().strings_to_categoricals(out)  # converts columns on the copy, in place
     for key in out.columns:
-        if _is_string_like(out[key]):
-            out[key] = out[key].astype(STRING_DTYPE)
+        out[key] = prepare_column(out[key])
     return out
+
+
+def prepare_column(column: pd.Series[Any]) -> pd.Series[Any]:
+    """One frame column laid out the way :func:`prepare_frame` lays out every column."""
+    import anndata as ad
+
+    frame = column.to_frame()
+    ad.AnnData().strings_to_categoricals(frame)  # anndata's rule, decided per column
+    out = frame.iloc[:, 0]
+    return out.astype(STRING_DTYPE) if _is_string_like(out) else out
+
+
+def nullable_series(values: Any) -> pd.Series[Any]:
+    """``values`` as a Series whose int and bool columns use pandas' nullable dtypes.
+
+    A reindex then inserts ``NA`` and keeps the dtype, where a numpy-backed int column would
+    silently become float64.
+    """
+    if isinstance(values, np.ndarray) and values.dtype.kind in "iub":
+        values = pd.array(values)
+    return pd.Series(values)
 
 
 def _is_string_like(values: pd.Series[Any] | pd.Index[Any]) -> bool:
@@ -75,6 +99,22 @@ def write_frame(parent: zarr.Group, key: str, df: pd.DataFrame) -> None:
     """
     write_elem(parent, key, prepare_frame(df))
     mark_nullable_strings(parent.require_group(key))
+
+
+def write_frame_column(frame: zarr.Group, name: str, column: pd.Series[Any]) -> None:
+    """Write one column into an existing anndata frame group, replacing it if present.
+
+    The column goes through :func:`prepare_column` and anndata's ``write_elem``, exactly as
+    :func:`write_frame` writes it, and ``name`` joins ``column-order`` when it is new.
+    """
+    if name in frame:
+        del frame[name]
+    out = prepare_column(column)
+    write_elem(frame, name, out.array if isinstance(out.dtype, ExtensionDtype) else out.to_numpy())
+    mark_nullable_strings(frame)
+    order = str_list_attr(frame, "column-order")
+    if name not in order:
+        frame.attrs["column-order"] = [*order, name]
 
 
 def mark_nullable_strings(group: zarr.Group) -> None:

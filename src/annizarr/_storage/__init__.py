@@ -7,7 +7,14 @@ from annizarr._storage._backends import (
     require_icechunk,
     storage_for,
 )
-from annizarr._storage._open import check_output_target, open_input_group, open_output_store, open_store_rw
+from annizarr._storage._open import (
+    check_output_target,
+    op_metadata,
+    open_input_group,
+    open_output_store,
+    open_store_rw,
+    verify_store_shape,
+)
 from annizarr._storage._uri import (
     bucket_prefix,
     canonical_location,
@@ -16,6 +23,7 @@ from annizarr._storage._uri import (
     prepare_output_path,
     scheme,
     store_name,
+    store_path,
 )
 
 __all__ = [
@@ -26,6 +34,7 @@ __all__ = [
     "is_icechunk_repo",
     "is_readonly_path",
     "is_remote",
+    "op_metadata",
     "open_input_group",
     "open_output_store",
     "open_repository",
@@ -35,4 +44,6 @@ __all__ = [
     "scheme",
     "storage_for",
     "store_name",
+    "store_path",
+    "verify_store_shape",
 ]

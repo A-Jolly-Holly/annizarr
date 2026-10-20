@@ -2,13 +2,12 @@ from __future__ import annotations
 
 import logging
 from dataclasses import replace
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from annizarr._core._config import AppConfig, resolve_backend_cfg
 from annizarr._core._sorting import stream_sorted_store
 from annizarr._core._zarr import get_group, has_element
-from annizarr._storage import check_output_target, is_remote, open_input_group, store_name
+from annizarr._storage import check_output_target, is_remote, op_metadata, open_input_group, store_name, store_path
 from annizarr.errors import ConversionError
 from annizarr.ops._result import OpResult
 
@@ -17,15 +16,15 @@ if TYPE_CHECKING:
 
     import zarr
 
-    from annizarr.typing import Layout, PathLike
+    from annizarr.typing import Layout, StoreLike
 
 logger = logging.getLogger(__name__)
 
 
 def sort(
-    store: PathLike,
+    store: StoreLike,
     *,
-    output: PathLike,
+    output: StoreLike,
     by: Sequence[str],
     cfg: AppConfig | None = None,
     branch: str | None = None,
@@ -36,9 +35,9 @@ def sort(
     Parameters
     ----------
     store
-        Existing AnnData zarr (or Icechunk) store, with CSR X, to read from.
+        Existing AnnData zarr store, or an Icechunk repo (path or :class:`~annizarr.ic.Repo`), with CSR X, to read from.
     output
-        Destination store path or URI.
+        Destination store path or URI, or a :class:`~annizarr.ic.Repo`.
     by
         Obs column name(s) to sort by, primary key first.
     cfg
@@ -69,7 +68,7 @@ def sort(
         cfg = AppConfig()
     cfg = resolve_backend_cfg(cfg)
     by = tuple(by)
-    if is_remote(output):
+    if is_remote(store_path(output)):
         raise ConversionError("sort streams through local temp stores; a remote output is not supported yet.")
     if not by:
         raise ConversionError("sort requires by=[OBS_COLUMN, ...].")
@@ -79,7 +78,7 @@ def sort(
 
     src = open_input_group(store)
     if "X" not in src:
-        raise ConversionError(f"no X in {store} — not an AnnData zarr store?")
+        raise ConversionError(f"no X in {store_path(store)} — not an AnnData zarr store?")
     if src["X"].attrs.get("encoding-type") != "csr_matrix":
         raise ConversionError(f"sort requires CSR X; got encoding {src['X'].attrs.get('encoding-type')!r}.")
     # a lone gexp layer is re-derived on the sorted output; anything else is refused
@@ -123,11 +122,12 @@ def sort(
         _read("obsm"),
         _read("varm"),
         _read("varp"),
-        Path(output),
+        output,
         cfg,
         sort_by=by,
         commit_message=commit_message,
+        commit_metadata=op_metadata("sort", source=store_name(store)),
         branch=branch,
         after_write=after_write,
     )
-    return OpResult(path=str(output), n_obs=n_obs, n_vars=n_vars, snapshot_id=snapshot_id)
+    return OpResult(path=store_path(output), n_obs=n_obs, n_vars=n_vars, snapshot_id=snapshot_id)

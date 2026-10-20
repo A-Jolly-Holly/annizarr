@@ -34,6 +34,13 @@ def get_group(group: zarr.Group, key: str) -> zarr.Group:
         raise ConversionError(f"'{key}' is not a group in '{group.path or '/'}': {exc}") from exc
 
 
+def element_length(node: zarr.Array[Any] | zarr.Group) -> int:
+    # rows of a 1-D anndata element: the array itself, a categorical's codes, a nullable column's values
+    if isinstance(node, zarr.Array):
+        return int(node.shape[0])
+    return int(get_array(node, "codes" if node.attrs.get("encoding-type") == "categorical" else "values").shape[0])
+
+
 def is_null(node: zarr.Array[Any] | zarr.Group) -> bool:
     """anndata>=0.13 stores a ``None`` element (``raw`` most often) as a 0-d array tagged ``null``."""
     return isinstance(node, zarr.Array) and node.attrs.get("encoding-type") == "null"
