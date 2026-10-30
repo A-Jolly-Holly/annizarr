@@ -1,7 +1,7 @@
 # AnniZarr
 
 Convert h5ad and 10x files into anndata-readable zarr v3 stores, then edit those stores: rechunk,
-sort, append cells, add a log-normalized layer. Every operation streams the matrix band by band and
+sort, append cells, copy a matrix into a layer in another layout. Every operation streams the matrix band by band and
 uses every core, so memory stays bounded at any store size, and every operation can write through an
 [Icechunk](icechunk.md) repository for versioned history.
 
@@ -20,7 +20,7 @@ annizarr convert a.h5ad b.h5ad -o merged.zarr                 # two or more inpu
 annizarr rechunk merged.zarr -o rechunked.zarr --row-chunk 2000
 annizarr sort merged.zarr -o sorted.zarr --by cell_type
 annizarr append sorted.zarr more_cells.zarr --drop-derived
-annizarr add-expr merged.zarr                                 # layers/gexp, CSC by default
+annizarr add-layer merged.zarr --layer counts_csc             # a CSC copy of X, for gene reads
 annizarr convert sample.h5ad -o repo.icechunk --ic -m "initial import"
 ```
 
@@ -31,7 +31,7 @@ arguments:
 import annizarr as az
 
 az.convert("sample.h5ad", output="sample.zarr")
-az.add_expr("sample.zarr", layout="csr")
+az.add_layer("sample.zarr", layer="counts_csc")
 repo = az.Repo("repo.icechunk")
 repo.log()
 ```
@@ -39,7 +39,7 @@ repo.log()
 ## Where to go next
 
 - One page per operation: [convert](ops/convert.md), [rechunk](ops/rechunk.md), [sort](ops/sort.md),
-  [append](ops/append.md), [add-expr](ops/add-expr.md).
+  [append](ops/append.md), [add-layer](ops/add-layer.md).
 - [Icechunk](icechunk.md): writing through a repository, branches, snapshots and the `Repo` API.
 - Reference: the [Python API](python-api.md) (configuration, errors, extension points), the
   [CLI](cli.md) (every flag, generated from `--help`) and [What annizarr writes](stores.md) (on-disk

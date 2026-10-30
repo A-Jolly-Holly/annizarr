@@ -2,7 +2,7 @@
 
 Append the cells of one converted store onto another, in place. Both are annizarr (or anndata) zarr
 stores or Icechunk repositories: convert the new cells first, then append. X grows along the cell axis
-on the store's existing chunk grid, obs grows with it, and nothing else is rewritten.
+on the store's existing chunk grid, obs and every layer both stores carry grow with it.
 
 ## Command line
 
@@ -10,7 +10,6 @@ on the store's existing chunk grid, obs grows with it, and nothing else is rewri
 annizarr convert batch2.h5ad -o batch2.zarr
 annizarr append atlas.zarr batch2.zarr                    # prompts before dropping obsm/obsp/layers
 annizarr append atlas.zarr batch2.zarr --drop-derived     # consent up front, for scripts
-annizarr append atlas.zarr batch2.zarr --extend-layers    # extend add-expr CSR layers instead of dropping them
 annizarr append atlas.zarr batch2.zarr --include-new-obs  # add obs columns only batch2 carries
 annizarr append repo.icechunk batch2.zarr --branch dev -m "batch 2"
 ```
@@ -21,17 +20,15 @@ annizarr append repo.icechunk batch2.zarr --branch dev -m "batch 2"
 import annizarr as az
 
 plan = az.plan_append("atlas.zarr", cells="batch2.zarr")  # metadata only, nothing is written
-plan.n_new, plan.drops(extend_layers=True), plan.notes
-az.append("atlas.zarr", cells="batch2.zarr", drop_derived=True, extend_layers=True)
+plan.n_new, plan.append_layers, plan.drops(), plan.notes
+az.append("atlas.zarr", cells="batch2.zarr", drop_derived=True)
 ```
 
 ## Options
 
-- `--drop-derived`: consent to dropping the obs-aligned elements the appended cells invalidate: obsm,
-  obsp, and layers that cannot be extended. Without it `append` prompts on a terminal and errors in a
-  script.
-- `--extend-layers`: extend CSR layers written by `add-expr` in place, applying each layer's recorded
-  normalization to the new cells, instead of dropping them.
+- `--drop-derived`: consent to dropping the obs-aligned elements the appended cells cannot extend:
+  obsm, obsp, and layers only the store carries. Without it `append` prompts on a terminal and errors
+  in a script. Layers both stores carry are appended whether or not it is given.
 - `--include-new-obs`: add obs columns that only the cells carry, with missing values on the existing
   cells, instead of leaving them out.
 - `--cpus N`, `--branch`, `-m`: see the [CLI reference](../cli.md#append). There is no chunk option;
@@ -41,6 +38,17 @@ az.append("atlas.zarr", cells="batch2.zarr", drop_derived=True, extend_layers=Tr
 
 - Both stores need CSR X of the same dtype and identical var (gene names and order). A non-empty raw
   in the target is refused; drop it first.
+- Layers are matched by name:
+
+  | Layer | What happens |
+  |---|---|
+  | in the store and the cells | appended in the store layer's encoding, whatever the cells' encoding is; the cells' values are cast to the store's dtype when nothing is lost (`float32` into `float64`), and a lossy cast (`float64` into `float32`, float into int) is an error before anything is written |
+  | in the store, not the cells | dropped, with `--drop-derived`; the warning names the `add-layer` command that re-creates it when the layer records its source |
+  | in the cells, not the store | left out with a warning |
+
+  CSR and dense layers grow in place like X. A CSC layer cannot (every gene gains entries in the
+  middle of the arrays), so it is rewritten whole, in parallel bands through a temp store, on every
+  append; the warning says so.
 - Obs columns are matched by name, and the store's schema wins:
 
   | Column | What happens |
@@ -70,14 +78,14 @@ az.append("atlas.zarr", cells="batch2.zarr", drop_derived=True, extend_layers=Tr
   overlap, since barcodes legitimately collide across samples.
 - A sorted store loses its contiguity. `append` warns about it, and `sort` restores it.
 - Before committing, `append` checks the store it wrote: X's offsets, nonzero count and shape, the
-  height of the index and every obs column, and any extended layer's offsets against X's. A mismatch
+  height of the index and every obs column, and every appended layer's shape and offsets. A mismatch
   raises `StorageError`, and on Icechunk nothing is committed. The check proves the store is shaped
   right, not that the values are the ones you appended.
 - On plain zarr the edit is in place and cannot be rolled back if the run dies midway. On Icechunk it
   is one commit, and a failed run leaves the repository as it was. With a `Repo` and `commit=False`
   the append is staged for a commit you make yourself; see
   [batching ops into one commit](../icechunk.md#batching-ops-into-one-commit).
-- `plan_append` returns an `AppendPlan(n_new, drop_obsm, drop_obsp, drop_layers, extendable_layers,
-  n_duplicate_names, notes, obs_extra, obs_filled, obs_promoted)`; `plan.drops(extend_layers)` lists
+- `plan_append` returns an `AppendPlan(n_new, drop_obsm, drop_obsp, drop_layers, append_layers,
+  n_duplicate_names, notes, obs_extra, obs_filled, obs_promoted)`; `plan.drops()` lists
   the element paths that would go. `obs_extra` are the cells-only columns, `obs_filled` the store
   columns the cells lack, and `obs_promoted` the store columns that would be rewritten as nullable.

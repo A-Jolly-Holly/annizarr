@@ -11,11 +11,11 @@ Install the extra first: `pip install "annizarr[icechunk]"`. It also brings the 
 
 Every operation takes `--ic` (or `IOConfig(backend="icechunk")`) and is exactly one commit on
 `--branch` (default `main`, created off main if missing), with `-m` as the message or an auto-generated
-one naming the op. `append` and `add-expr` detect an existing repository on their own.
+one naming the op. `append` and `add-layer` detect an existing repository on their own.
 
 ```bash
 annizarr convert sample.h5ad -o repo.icechunk --ic -m "initial import"
-annizarr add-expr repo.icechunk --branch dev -m "add lognorm layer"
+annizarr add-layer repo.icechunk --layer counts_csc --branch dev -m "csc copy for gene reads"
 annizarr append repo.icechunk batch2.zarr -m "batch 2"
 annizarr sort repo.icechunk -o sorted.icechunk --by cell_type --ic
 ```
@@ -81,7 +81,7 @@ az.append(repo, cells="batch2.zarr")  # reads the mount, commits to the origin
 
 ## Batching ops into one commit
 
-`append` and `add_expr` take `commit=False`, which stages the edit on the `Repo` you pass and leaves
+`append` and `add_layer` take `commit=False`, which stages the edit on the `Repo` you pass and leaves
 the commit to you, so several edits land as one snapshot with your own message and metadata. The
 results carry `snapshot_id=None`, as a plain-zarr result does. It needs a `Repo` instance (a path
 would open a repo the op then drops, losing the staged session) and an Icechunk store; anything
@@ -90,7 +90,7 @@ else raises `StorageError`. Deferring skips the commit, never the checks `append
 ```python
 repo = az.Repo("s3://bucket/atlas.icechunk", branch="ingest-42")
 az.append(repo, cells="batch42.zarr", drop_derived=True, commit=False)
-az.add_expr(repo, layout="csr", commit=False)
+az.add_layer(repo, layer="counts_csc", commit=False)
 repo.commit("ingest 42", metadata={"run": "42"})
 ```
 

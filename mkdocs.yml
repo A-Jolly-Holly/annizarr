@@ -19,7 +19,7 @@ nav:
       - rechunk: ops/rechunk.md
       - sort: ops/sort.md
       - append: ops/append.md
-      - add-expr: ops/add-expr.md
+      - add-layer: ops/add-layer.md
   - Icechunk: icechunk.md
   - Reference:
       - Python API: python-api.md
