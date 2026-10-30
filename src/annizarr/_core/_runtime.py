@@ -3,12 +3,14 @@ from __future__ import annotations
 import functools
 import logging
 import os
-import sys
 import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
+
+from annizarr._core._system import usable_cpus
+from annizarr.errors import ConversionError
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
@@ -31,37 +33,8 @@ def configure_runtime(cpus: int) -> None:
 
     pin_blas()
     # both zarr knobs: async.concurrency only dispatches fetches, max_workers runs decompression.
-    workers = max(cpus, os.cpu_count() or 1)
+    workers = max(cpus, usable_cpus())
     zarr.config.set({"async.concurrency": 64, "threading.max_workers": workers})
-    check_worker_memory(cpus)
-
-
-def available_memory() -> int | None:
-    # Linux reports what it can hand out without swapping; elsewhere three quarters of physical RAM
-    try:
-        if sys.platform.startswith("linux"):
-            with open("/proc/meminfo") as f:
-                for line in f:
-                    if line.startswith("MemAvailable:"):
-                        return int(line.split()[1]) * 1024
-        return os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE") * 3 // 4
-    except (OSError, ValueError, AttributeError):
-        return None
-
-
-def check_worker_memory(cpus: int) -> None:
-    from annizarr._core import _layout
-
-    available = available_memory()
-    if available is None:
-        return
-    # a band worker holds its import baseline plus one band working set; the parent adds its own
-    worker_peak = _layout.WORKER_BASELINE_BYTES + _layout.BATCH_BYTES
-    if cpus * worker_peak > 0.8 * available:
-        logger.warning(
-            f"{cpus} band workers at up to {worker_peak / 1024**2:.0f}MB each may exceed the "
-            f"{available / 1024**3:.1f}GB of memory available; pass a lower --cpus to leave headroom."
-        )
 
 
 def _init_worker() -> None:
@@ -80,6 +53,24 @@ def _executor(mode: Literal["threads", "processes"], cpus: int) -> Any:
     return ThreadPoolExecutor(max_workers=cpus)
 
 
+@contextmanager
+def _explain_killed_worker() -> Iterator[None]:
+    # a pool worker that dies without raising (the OOM killer, most often) otherwise surfaces as a bare
+    # "terminated abruptly"; one worker's peak is fixed by the band budget, so --cpus is the lever
+    from concurrent.futures.process import BrokenProcessPool
+
+    from annizarr._core import _layout
+
+    try:
+        yield
+    except BrokenProcessPool as exc:
+        worker_mb = (_layout.WORKER_BASELINE_BYTES + _layout.BATCH_BYTES) // 1024**2
+        raise ConversionError(
+            f"a worker process died abruptly ({exc}). The usual cause is the out-of-memory killer: each worker "
+            f"holds up to about {worker_mb}MB, so try a lower --cpus."
+        ) from exc
+
+
 def run_parallel(
     worker: Callable[..., None],
     jobs: Sequence[tuple[object, ...]],
@@ -92,7 +83,7 @@ def run_parallel(
         for job in jobs:
             worker(*job)
         return
-    with _executor(mode, cpus) as ex:
+    with _explain_killed_worker(), _executor(mode, cpus) as ex:
         futures = [ex.submit(worker, *job) for job in jobs]
         try:
             for fut in futures:
@@ -184,7 +175,11 @@ def pipeline_parallel(
             ready[idx] = payload
             ready_cv.notify_all()
 
-    with _executor(mode, cpus) as readers, _executor("threads", 1 if ordered else cpus) as writers:
+    with (
+        _explain_killed_worker(),
+        _executor(mode, cpus) as readers,
+        _executor("threads", 1 if ordered else cpus) as writers,
+    ):
         if ordered:
             writers.submit(write_in_order)
         for idx, job in enumerate(jobs):
@@ -198,7 +193,8 @@ def pipeline_parallel(
             inflight.acquire()
 
     if errors:
-        raise errors[0]
+        with _explain_killed_worker():  # a read failure is collected, so it is raised past the pool's block
+            raise errors[0]
 
 
 def map_parallel(
@@ -212,7 +208,7 @@ def map_parallel(
     # parallel step, e.g. a dense reader's row-banded nnz-counting pass).
     if cpus <= 1 or len(jobs) <= 1:
         return [worker(*job) for job in jobs]
-    with _executor(mode, cpus) as ex:
+    with _explain_killed_worker(), _executor(mode, cpus) as ex:
         futures = [ex.submit(worker, *job) for job in jobs]
         try:
             return [fut.result() for fut in futures]

@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import os
-
 import numpy as np
 import pandas as pd
 import pytest
 from anndata import AnnData
 
 from annizarr._core._config import DENSE_CHUNK, resolve_backend_cfg
+from annizarr._core._system import usable_cpus
 from annizarr._core._validation import require_matrix
 from annizarr.config import AppConfig, ChunkConfig, IOConfig, apply_cli_overrides
 from annizarr.errors import ValidationError
@@ -18,7 +17,7 @@ def test_defaults() -> None:
     assert cfg.chunks.row_chunk is None and cfg.chunks.col_chunk is None  # dense falls back to DENSE_CHUNK
     assert DENSE_CHUNK == 2048 and cfg.chunks.nnz_chunk == 9_000_000
     assert cfg.io.layout == "csr" and cfg.io.lazy is True and cfg.chunks.auto_shard is False
-    assert cfg.chunks.cpus == (os.cpu_count() or 1)
+    assert cfg.chunks.cpus == usable_cpus() and cfg.chunks.clevel is None
 
 
 def test_cli_overrides_apply_and_validate() -> None:
@@ -29,6 +28,9 @@ def test_cli_overrides_apply_and_validate() -> None:
         apply_cli_overrides(AppConfig(), layout="not-a-mode")
     with pytest.raises(ValueError, match="shard_factor"):
         apply_cli_overrides(AppConfig(), shard_factor=0)
+    assert apply_cli_overrides(AppConfig(), clevel=0).chunks.clevel == 0
+    with pytest.raises(ValueError, match="clevel"):
+        apply_cli_overrides(AppConfig(), clevel=10)
 
 
 def test_resolve_backend_cfg_keeps_lazy_and_warns_on_sparse_sharding(caplog: pytest.LogCaptureFixture) -> None:

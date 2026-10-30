@@ -1,15 +1,15 @@
 from __future__ import annotations
 
-import logging
-import os
 import threading
 import time
+from pathlib import Path
 from typing import Literal
 
 import pytest
 
 from annizarr._core._runtime import configure_runtime, map_parallel, pipeline_parallel, run_parallel
-from helpers import double, identity, raise_on, sleep_reverse, worker_zarr_threads
+from annizarr._core._system import usable_cpus
+from helpers import double, exit_abruptly, identity, raise_on, sleep_reverse, worker_zarr_threads
 
 
 def test_configure_runtime_sizes_the_codec_pool_and_workers_cap_theirs() -> None:
@@ -17,7 +17,7 @@ def test_configure_runtime_sizes_the_codec_pool_and_workers_cap_theirs() -> None
 
     configure_runtime(2)
     configure_runtime(4)  # a second op must not keep the first call's sizing
-    assert zarr.config.get("threading.max_workers") == max(4, os.cpu_count() or 1)
+    assert zarr.config.get("threading.max_workers") == max(4, usable_cpus())
     assert map_parallel(worker_zarr_threads, [(0,), (1,)], 2, mode="processes") == [2, 2]
 
 
@@ -62,25 +62,45 @@ def test_run_parallel_fails_fast() -> None:
         run_parallel(worker, [(i,) for i in range(50)], cpus=4, mode="threads")
 
 
-def test_check_worker_memory_warns_when_workers_outgrow_available_ram(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+@pytest.mark.parametrize(
+    ("files", "expected"),
+    [
+        ({"sys/fs/cgroup/cpu.max": "100000 100000"}, 1),
+        ({"sys/fs/cgroup/cpu.max": "250000 100000"}, 3),  # a fractional quota rounds up
+        ({"sys/fs/cgroup/cpu.max": "max 100000"}, None),
+        ({"proc/self/cgroup": "0::/job", "sys/fs/cgroup/job/cpu.max": "200000 100000"}, 2),  # own cgroup first
+        (  # a parent slice's limit binds the child below it
+            {
+                "proc/self/cgroup": "0::/slice/job",
+                "sys/fs/cgroup/slice/cpu.max": "100000 100000",
+                "sys/fs/cgroup/slice/job/cpu.max": "max 100000",
+            },
+            1,
+        ),
+        ({"sys/fs/cgroup/cpu/cpu.cfs_quota_us": "150000", "sys/fs/cgroup/cpu/cpu.cfs_period_us": "100000"}, 2),
+        ({"sys/fs/cgroup/cpu/cpu.cfs_quota_us": "-1", "sys/fs/cgroup/cpu/cpu.cfs_period_us": "100000"}, None),
+        ({}, None),
+    ],
+)
+def test_usable_cpus_caps_the_affinity_count_by_a_cgroup_quota(
+    tmp_path: Path, files: dict[str, str], expected: int | None
 ) -> None:
-    from annizarr._core import _layout, _runtime
+    from annizarr._core._system import usable_cpus
 
-    monkeypatch.setattr(_runtime, "available_memory", lambda: 4 * 1024**3)
-    caplog.set_level(logging.WARNING, logger="annizarr")
-    _runtime.check_worker_memory(2)  # 2 x (baseline + 512MiB) is well under 80% of 4GiB
-    assert not caplog.records
-    _runtime.check_worker_memory(16)
-    assert any("pass a lower --cpus" in r.message for r in caplog.records)
-    monkeypatch.setattr(_layout, "BATCH_BYTES", 16 * 1024**2)
-    caplog.clear()
-    _runtime.check_worker_memory(16)  # a smaller band budget shrinks the estimate
-    assert not caplog.records
+    for rel, text in files.items():
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text(text)
+    unconstrained = usable_cpus(str(tmp_path / "nowhere"))
+    assert usable_cpus(str(tmp_path)) == (unconstrained if expected is None else min(expected, unconstrained))
 
 
-def test_available_memory_falls_back_to_three_quarters_of_ram_off_linux(monkeypatch: pytest.MonkeyPatch) -> None:
-    from annizarr._core import _runtime
+def test_a_killed_worker_names_cpus_as_the_fix() -> None:
+    from annizarr.errors import ConversionError
 
-    monkeypatch.setattr(_runtime.sys, "platform", "darwin")
-    assert _runtime.available_memory() == os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE") * 3 // 4
+    for run in (
+        lambda: map_parallel(exit_abruptly, [(i,) for i in range(4)], 2, mode="processes"),
+        lambda: run_parallel(exit_abruptly, [(i,) for i in range(4)], 2, mode="processes"),
+        lambda: pipeline_parallel(exit_abruptly, lambda _: None, [(i,) for i in range(4)], 2, mode="processes"),
+    ):
+        with pytest.raises(ConversionError, match="lower --cpus"):
+            run()

@@ -139,16 +139,6 @@ def random_dense(n_obs: int, n_vars: int, *, seed: int, density: float = 0.3) ->
     return (mask * rng.random((n_obs, n_vars))).astype(np.float32)
 
 
-def expected_lognorm(x: Any, target_sum: float = 1e4) -> np.ndarray:
-    """``log1p(x * target_sum / row_sum)`` as float32, dense; empty rows stay zero."""
-    x = sp.csr_matrix(x, dtype=np.float64)
-    sums = np.asarray(x.sum(axis=1)).ravel()
-    factor = np.divide(target_sum, sums, out=np.zeros_like(sums), where=sums > 0)
-    out = x.multiply(factor[:, None]).tocsr()
-    out.data = np.log1p(out.data)
-    return out.astype(np.float32).toarray()
-
-
 def read_x(store: Path | str) -> np.ndarray:
     x = ad.read_zarr(str(store)).X
     return np.asarray(x.todense() if sp.issparse(x) else x)
@@ -218,4 +208,13 @@ def sleep_reverse(x: int) -> int:
     import time
 
     time.sleep(0.002 * (20 - x))  # later jobs finish first
+    return x
+
+
+def exit_abruptly(x: int) -> int:
+    # stands in for a worker the kernel kills (the OOM killer): no exception, the process just ends
+    import os
+
+    if x == 1:
+        os._exit(1)
     return x

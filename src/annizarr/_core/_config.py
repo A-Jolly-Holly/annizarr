@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Literal
 
+from annizarr._core._system import usable_cpus
 from annizarr.errors import ValidationError
 
 if TYPE_CHECKING:
@@ -57,10 +57,6 @@ class IOConfig:
     backend: BackendMode = "zarr"
 
 
-def _all_cpus() -> int:
-    return os.cpu_count() or 1
-
-
 @dataclass(frozen=True, slots=True)
 class ChunkConfig:
     """Chunk/shard sizing and worker count for matrix writes.
@@ -83,28 +79,34 @@ class ChunkConfig:
     cpus
         Workers for parallel matrix chunk writes: threads for a thread-safe reader
         (in-memory or zarr-backed), processes for a lazy h5py-backed one (not thread-safe).
-        Defaults to every available CPU core (``os.cpu_count()``); pass a lower number to
-        leave headroom on a shared/HPC host.
+        Defaults to every core this process may use (its affinity mask, capped by a container
+        CPU limit); each worker holds up to about 630MB, so pass a lower number on a host with
+        less memory per core, or to leave headroom on a shared/HPC host.
     shard_factor
         Pack this many chunks per shard along each axis of dense X (``1`` = no
         sharding; sparse output ignores it). See :func:`annizarr._core._layout.dense_shards`.
     auto_shard
         Shard our own 1-D sparse arrays (``data``/``indices`` of X, layers, raw.X, and the
-        add-expr/rechunk/sort-created ones) with zarr's ``shards="auto"``, and set
+        add-layer/rechunk/sort-created ones) with zarr's ``shards="auto"``, and set
         ``ad.settings.auto_shard_zarr_v3`` around every ``write_elem`` call this op makes
         (obs/var columns, obsm, uns, …), so anndata's own writes are auto-sharded too.
         Cuts object/file count on remote or many-small-chunk stores at a small write-time
         cost (see :func:`annizarr._writers._encoding.sparse_shards`). Dense X is unaffected
         — it keeps the explicit ``shard_factor`` above, never ``shards="auto"``. ``False``
         (the default) reproduces the pre-autoshard on-disk layout exactly.
+    clevel
+        Blosc-zstd compression level (0-9, 0 = uncompressed) of every matrix array an op
+        creates. ``None`` (the default) means :data:`annizarr._core._layout.DEFAULT_CLEVEL`;
+        ``rechunk`` instead keeps the source matrix's compression unless this is set.
     """
 
     row_chunk: int | None = None
     col_chunk: int | None = None
     nnz_chunk: int = 9_000_000
-    cpus: int = field(default_factory=_all_cpus)
+    cpus: int = field(default_factory=usable_cpus)
     shard_factor: int = 1
     auto_shard: bool = False
+    clevel: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,6 +186,8 @@ def _validate_config(config: AppConfig) -> AppConfig:
             raise ValidationError(f"chunks.{name} must be >= 1; got {axis_chunk}.")
     if config.chunks.nnz_chunk < 1:
         raise ValidationError(f"chunks.nnz_chunk must be >= 1; got {config.chunks.nnz_chunk}.")
+    if config.chunks.clevel is not None and not 0 <= config.chunks.clevel <= 9:
+        raise ValidationError(f"chunks.clevel must be between 0 and 9; got {config.chunks.clevel}.")
     if config.chunks.shard_factor < 1:
         raise ValidationError(f"chunks.shard_factor must be >= 1 (1 = no sharding); got {config.chunks.shard_factor}.")
     return replace(config, io=io, grouping=grouping, concat=concat)
@@ -200,6 +204,7 @@ def apply_cli_overrides(
     nnz_chunk: int | None = None,
     shard_factor: int | None = None,
     auto_shard: bool | None = None,
+    clevel: int | None = None,
     cpus: int | None = None,
     lazy: bool | None = None,
     backend: str | None = None,
@@ -234,6 +239,8 @@ def apply_cli_overrides(
         chunk_cfg = replace(chunk_cfg, shard_factor=shard_factor)
     if auto_shard is not None:
         chunk_cfg = replace(chunk_cfg, auto_shard=auto_shard)
+    if clevel is not None:
+        chunk_cfg = replace(chunk_cfg, clevel=clevel)
     if cpus is not None:
         chunk_cfg = replace(chunk_cfg, cpus=cpus)
     if sort_by is not None:

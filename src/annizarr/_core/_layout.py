@@ -18,6 +18,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Blosc-zstd level for new matrix arrays: 2-3.6x faster to write than 5 for 1-7% more bytes on real counts
+# (measured 2026-10-29, HIHA raw counts, one thread)
+DEFAULT_CLEVEL = 3
+
 # read as `_layout.BATCH_BYTES` (module attribute, not a `from`-import) so tests can monkeypatch it.
 # working-set budget per band worker: wall time was flat from 64 to 256MiB at 600k cells and the
 # larger budget is for very large stores and large chunks, where per-band overhead matters more
@@ -40,23 +44,18 @@ WRITE_COPY_FRACTION = 0.85
 SCATTER_BYTES_PER_NNZ = 44
 # 12 read back (value, target, source) + 8 argsort + 8 permuted copies
 PLACE_BYTES_PER_NNZ = 28
-# 8 band + 8 float64 copy scaled in place + 8 repeated factors + 4 float32 result
-LOGNORM_BYTES_PER_NNZ = 28
 # 8 CSR batch + 8 per-group copy
 BUCKET_BYTES_PER_NNZ = 16
 # int32 indices only, plus the bincount input
 COUNT_BYTES_PER_NNZ = 8
-# 4 data + 8 float64 copy + 8 cumulative sum
-ROW_SUM_BYTES_PER_NNZ = 20
 
 __all__ = [
     "BATCH_BYTES",
     "BUCKET_BYTES_PER_NNZ",
     "COUNT_BYTES_PER_NNZ",
-    "LOGNORM_BYTES_PER_NNZ",
+    "DEFAULT_CLEVEL",
     "PIPELINE_BATCH_BYTES",
     "PLACE_BYTES_PER_NNZ",
-    "ROW_SUM_BYTES_PER_NNZ",
     "SCATTER_BYTES_PER_NNZ",
     "WORKER_BASELINE_BYTES",
     "WRITE_COPY_FRACTION",
@@ -140,10 +139,11 @@ def major_bands(indptr: Sequence[int] | NDArray[Any], *, max_nnz: int, cpus: int
     return tuple((edges[i], edges[i + 1]) for i in range(len(edges) - 1))
 
 
-def x_compressors() -> tuple[object, ...]:
+def x_compressors(clevel: int | None = None) -> tuple[object, ...]:
     from zarr.codecs import BloscCodec
 
-    return (BloscCodec(cname="zstd", clevel=5, shuffle="shuffle"),)  # zarr's default has no shuffle
+    level = DEFAULT_CLEVEL if clevel is None else clevel
+    return (BloscCodec(cname="zstd", clevel=level, shuffle="shuffle"),)  # zarr's default has no shuffle
 
 
 @dataclass(frozen=True, slots=True)
