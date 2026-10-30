@@ -16,7 +16,7 @@ logging.getLogger(__name__).addHandler(logging.NullHandler())  # quiet by defaul
 if TYPE_CHECKING:
     from annizarr._core._config import AppConfig
     from annizarr.ic import Repo
-    from annizarr.ops import AppendPlan, OpResult, add_expr, append, convert, plan_append, rechunk, sort
+    from annizarr.ops import AppendPlan, OpResult, add_layer, append, convert, plan_append, rechunk, sort
 
 __all__ = [
     "AnzError",
@@ -29,7 +29,7 @@ __all__ = [
     "StorageError",
     "ValidationError",
     "__version__",
-    "add_expr",
+    "add_layer",
     "append",
     "config",
     "convert",
@@ -48,7 +48,7 @@ _LAZY: dict[str, str] = {
     "Repo": "annizarr.ic",
     "AppendPlan": "annizarr.ops",
     "OpResult": "annizarr.ops",
-    "add_expr": "annizarr.ops",
+    "add_layer": "annizarr.ops",
     "append": "annizarr.ops",
     "convert": "annizarr.ops",
     "plan_append": "annizarr.ops",

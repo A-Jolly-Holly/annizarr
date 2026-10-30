@@ -59,6 +59,24 @@ def shape_attr(node: zarr.Array[Any] | zarr.Group) -> tuple[int, int]:
     return int(n_obs), int(n_vars)
 
 
+def matrix_shape(node: zarr.Array[Any] | zarr.Group) -> tuple[int, int]:
+    # a dense matrix's own shape, or a sparse group's shape attribute
+    if isinstance(node, zarr.Array):
+        n_rows, n_cols = node.shape
+        return int(n_rows), int(n_cols)
+    return shape_attr(node)
+
+
+def matrix_keys(root: zarr.Group) -> list[str]:
+    # the cells x features matrix elements of an AnnData group: X, every layers/<k>, raw/X
+    keys = ["X"] if "X" in root else []
+    if "layers" in root:
+        keys += [f"layers/{k}" for k in get_group(root, "layers")]
+    if has_element(root, "raw") and "X" in get_group(root, "raw"):
+        keys.append("raw/X")
+    return keys
+
+
 def str_attr(node: zarr.Array[Any] | zarr.Group, key: str) -> str:
     return cast(str, node.attrs[key])
 

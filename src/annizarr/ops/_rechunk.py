@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import zarr
 
 from annizarr._core._config import AppConfig, resolve_backend_cfg
-from annizarr._core._layout import check_write_unit, dense_shards, write_grid
-from annizarr._core._runtime import configure_runtime, run_parallel, stage
-from annizarr._core._zarr import get_group, has_element, shape_attr
+from annizarr._core._runtime import configure_runtime, stage
+from annizarr._core._zarr import get_group, has_element, matrix_keys, matrix_shape
 from annizarr._storage import (
     check_output_target,
     op_metadata,
@@ -16,7 +15,7 @@ from annizarr._storage import (
     store_name,
     store_path,
 )
-from annizarr._writers._encoding import sparse_shards, suppress_autoshard_warning
+from annizarr._writers._copy import copy_matrix
 from annizarr.errors import ConversionError
 from annizarr.ops._result import OpResult
 
@@ -74,13 +73,9 @@ def rechunk(
     configure_runtime(cfg.chunks.cpus)
     src = open_input_group(store)
 
-    matrix_keys = ["X"]
-    if "layers" in src:
-        matrix_keys += [f"layers/{k}" for k in get_group(src, "layers")]
-    if has_element(src, "raw") and "X" in get_group(src, "raw"):
-        matrix_keys.append("raw/X")
-    if matrix not in matrix_keys:
-        raise ConversionError(f"matrix '{matrix}' is not a matrix element ({matrix_keys}).")
+    keys = matrix_keys(src)
+    if matrix not in keys:
+        raise ConversionError(f"matrix '{matrix}' is not a matrix element ({keys}).")
 
     ad.settings.zarr_write_format = 3
     commit_message = message or f"annizarr rechunk {matrix} → {store_name(output)}"
@@ -90,7 +85,7 @@ def rechunk(
         commit_message=commit_message,
         commit_metadata=op_metadata("rechunk", source=store_name(store)),
         branch=branch,
-        expected_shape=_matrix_shape(src["X"]),
+        expected_shape=matrix_shape(src["X"]),
     )
     try:
         dst = out.root
@@ -117,7 +112,7 @@ def rechunk(
                             "csr_matrix",
                             "csc_matrix",
                         ):
-                            _copy_matrix(node, dst, f"{key}/{child}", cfg, rechunk=False)
+                            copy_matrix(node, dst, f"{key}/{child}", cfg, rechunk=False)
                         else:
                             write_elem(g, child, read_elem(node))
                 if has_element(src, "raw"):
@@ -134,108 +129,14 @@ def rechunk(
                 layers = dst.require_group("layers")
                 layers.attrs.update(dict(src_layers.attrs))
 
-            for key in matrix_keys:
+            for key in keys:
                 rechunked = key == matrix
                 with stage(f"{'Rechunking' if rechunked else 'Copying'} {key}"):
-                    _copy_matrix(src[key], dst, key, cfg, rechunk=rechunked)
+                    copy_matrix(src[key], dst, key, cfg, rechunk=rechunked)
 
-        n_obs, n_vars = _matrix_shape(src["X"])
+        n_obs, n_vars = matrix_shape(src["X"])
         snapshot_id = out.finalize()
     except BaseException:
         out.abort()
         raise
     return OpResult(path=store_path(output), n_obs=n_obs, n_vars=n_vars, snapshot_id=snapshot_id)
-
-
-def _matrix_shape(node: Any) -> tuple[int, int]:
-    if isinstance(node, zarr.Array):
-        n_rows, n_cols = node.shape
-        return n_rows, n_cols
-    return shape_attr(node)
-
-
-def _copy_matrix(node: Any, dst_root: Any, key: str, cfg: AppConfig, *, rechunk: bool) -> None:
-    from annizarr._core import _layout
-
-    parent_path, _, name = key.rpartition("/")
-    parent = dst_root[parent_path] if parent_path else dst_root
-
-    if isinstance(node, zarr.Array):
-        n_rows, n_cols = node.shape
-        if rechunk:
-            row_chunk, col_chunk = _layout.dense_chunks(cfg.chunks, n_rows, n_cols)
-            layout = dense_shards(row_chunk, col_chunk, n_rows, n_cols, cfg.chunks.shard_factor)
-            out_chunks, shards = layout.chunks, layout.shards
-        else:
-            out_chunks = (node.chunks[0], node.chunks[1])
-            node_shards = node.shards
-            shards = (node_shards[0], node_shards[1]) if node_shards is not None else None
-        out = parent.require_array(
-            name,
-            shape=node.shape,
-            dtype=node.dtype,
-            chunks=out_chunks,
-            shards=shards,
-            compressors=node.compressors,
-            overwrite=True,
-        )
-        out.attrs.update(dict(node.attrs))
-        check_write_unit(out)
-        block_row, block_col = write_grid(out)
-        jobs = [
-            (node, out, r0, min(r0 + block_row, n_rows), c0, min(c0 + block_col, n_cols))
-            for r0 in range(0, n_rows, block_row)
-            for c0 in range(0, n_cols, block_col)
-        ]
-        run_parallel(_copy_block, jobs, cfg.chunks.cpus)
-        return
-
-    enc = node.attrs.get("encoding-type")
-    if enc not in ("csr_matrix", "csc_matrix"):
-        raise ConversionError(f"cannot copy '{key}': unsupported encoding {enc!r}.")
-    g = parent.require_group(name)
-    g.attrs.update(dict(node.attrs))
-    nnz = int(node["data"].shape[0])
-    # rechunk=False (copy-as-is) preserves the source's exact chunk+shard shape, so a copy
-    # never silently drops sharding.
-    if rechunk:
-        n_rows, n_cols = _matrix_shape(node)
-        csr = enc == "csr_matrix"
-        flat = _layout.sparse_flat_chunk(cfg.chunks, csr=csr, nnz=nnz, n_major=n_rows if csr else n_cols)
-        out_shards = sparse_shards(cfg.chunks.auto_shard)
-    else:
-        flat = node["data"].chunks[0]
-        out_shards = node["data"].shards
-    for arr_name in ("data", "indices"):
-        src_a = node[arr_name]
-        with suppress_autoshard_warning(rechunk and cfg.chunks.auto_shard):
-            out = g.require_array(
-                arr_name,
-                shape=src_a.shape,
-                dtype=src_a.dtype,
-                chunks=(flat,),
-                shards=out_shards,
-                compressors=src_a.compressors,
-                overwrite=True,
-            )
-        out.attrs.update(dict(src_a.attrs))
-        check_write_unit(out)
-        step = write_grid(out)[0]
-        bytes_per_item = _layout.copy_bytes_per_item(src_a.dtype.itemsize)
-        segments = _layout.plan_bands(
-            nnz, unit=step, bytes_per_item=bytes_per_item, cpus=cfg.chunks.cpus, grain=src_a.chunks[0]
-        )
-        flat_jobs = [(src_a, out, s0, s1) for s0, s1 in segments]
-        run_parallel(_copy_flat, flat_jobs, cfg.chunks.cpus)
-    ip = node["indptr"]
-    out = g.require_array("indptr", shape=ip.shape, dtype=ip.dtype, chunks=ip.shape, overwrite=True)
-    out.attrs.update(dict(ip.attrs))
-    out[:] = ip[:]
-
-
-def _copy_block(src: Any, dst: Any, r0: int, r1: int, c0: int, c1: int) -> None:
-    dst[r0:r1, c0:c1] = src[r0:r1, c0:c1]
-
-
-def _copy_flat(src: Any, dst: Any, s0: int, s1: int) -> None:
-    dst[s0:s1] = src[s0:s1]

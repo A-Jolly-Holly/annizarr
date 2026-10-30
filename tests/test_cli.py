@@ -17,8 +17,8 @@ import zarr
 from annizarr._cli import main
 from annizarr._core._config import ChunkConfig
 from annizarr._version import __version__
-from annizarr.ops import add_expr
-from helpers import assert_anndata_readable, expected_lognorm, make_10x_v3_h5, make_adata, make_h5ad
+from annizarr.ops import add_layer
+from helpers import assert_anndata_readable, cfg, make_10x_v3_h5, make_adata, make_h5ad, read_x
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -61,37 +61,38 @@ def test_errors_exit_codes_and_quiet(tmp_path: Path, capsys: pytest.CaptureFixtu
     assert "error:" in capsys.readouterr().err
     assert main(["-q", "convert", str(h5), "-o", str(out), "--overwrite", "--cpus", "2"]) == 0
     assert "wrote" not in capsys.readouterr().err
-    assert main(["add-expr", str(tmp_path / "missing.zarr")]) == 1
+    assert main(["add-layer", str(tmp_path / "missing.zarr"), "--layer", "csc"]) == 1
 
 
 def test_op_subcommands_dispatch(tmp_path: Path) -> None:
     h5 = make_h5ad(tmp_path, "in.h5ad", adata=make_adata(n_obs=8, n_vars=5, seed=2))
     store = tmp_path / "store.zarr"
     assert main(["convert", str(h5), "-o", str(store), "--cpus", "2"]) == 0
-    assert main(["add-expr", str(store), "--col-chunk", "2", "--cpus", "2"]) == 0
+    assert main(["add-layer", str(store), "--layer", "csc", "--col-chunk", "2", "--clevel", "1", "--cpus", "2"]) == 0
     assert_anndata_readable(store)
-    assert "gexp" in ad.read_zarr(str(store)).layers
+    np.testing.assert_array_equal(ad.read_zarr(str(store)).layers["csc"].toarray(), read_x(store))
+    with pytest.raises(SystemExit):  # --layer is required: nothing is named implicitly
+        main(["add-layer", str(store)])
     assert main(["rechunk", str(store), "-o", str(tmp_path / "rechunked.zarr"), "--row-chunk", "2", "--cpus", "2"]) == 0
     assert ad.read_zarr(str(tmp_path / "rechunked.zarr")).n_obs == 8
     assert main(["sort", str(store), "-o", str(tmp_path / "sorted.zarr"), "--by", "cell_type", "--cpus", "2"]) == 0
     assert (np.diff(ad.read_zarr(str(tmp_path / "sorted.zarr")).obs["cell_type"].cat.codes.to_numpy()) >= 0).all()
 
 
-def test_append_consent_and_extend_layers(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_append_consent_and_shared_layers(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     a, b = make_adata(n_obs=4, seed=0), make_adata(n_obs=2, seed=1)
     sa, sb = tmp_path / "a.zarr", tmp_path / "b.zarr"
     assert main(["convert", str(make_h5ad(tmp_path, "a.h5ad", adata=a)), "-o", str(sa), "--cpus", "2"]) == 0
     assert main(["convert", str(make_h5ad(tmp_path, "b.h5ad", adata=b)), "-o", str(sb), "--cpus", "2"]) == 0
-    add_expr(str(sa), layout="csr")
+    add_layer(str(sa), layer="csc", cfg=cfg())
+    add_layer(str(sb), layer="csc", layout="csr", cfg=cfg())
     assert main(["append", str(sa), str(sb)]) == 1  # obsm would drop and stdin is not a TTY: no prompt, exit 1
     err = capsys.readouterr().err
     assert "error:" in err and "--drop-derived" in err and ad.read_zarr(str(sa)).n_obs == 4
-    assert main(["append", str(sa), str(sb), "--extend-layers", "--drop-derived", "--cpus", "2"]) == 0
+    assert main(["append", str(sa), str(sb), "--drop-derived", "--cpus", "2"]) == 0
     got = ad.read_zarr(str(sa))
     assert got.n_obs == 6 and "X_pca" not in got.obsm
-    np.testing.assert_allclose(
-        got.layers["gexp"].toarray(), expected_lognorm(np.vstack([a.X.toarray(), b.X.toarray()])), rtol=1e-5
-    )
+    np.testing.assert_array_equal(got.layers["csc"].toarray(), np.vstack([a.X.toarray(), b.X.toarray()]))
 
     a.obsm.clear()  # nothing to drop, so no consent needed
     assert (
