@@ -72,16 +72,15 @@ def _model(cpus: int, nnz: int, worker: int, parent: int) -> dict[str, int]:
     # a place worker reads its band back (12 B/nnz), sorts it, permutes it and writes it (zarr's copy)
     place_band = place_nnz * (_layout.PLACE_BYTES_PER_NNZ + int(8 * _layout.WRITE_COPY_FRACTION))
     scatter_band = scatter_nnz * _layout.SCATTER_BYTES_PER_NNZ
-    lognorm_scatter_band = scatter_nnz * (_layout.SCATTER_BYTES_PER_NNZ + 8)
     bucket_nnz = budget // _layout.BUCKET_BYTES_PER_NNZ
     # append: the seam chunk is read-modify-written (about 4 x its raw bytes) while the obs index is scanned
     seam = 4 * unit * 4
     index_scan = (N_OBS + N_APPEND) * 100
-    # a lazy h5 source reads in worker processes; a zarr-backed source (add-expr, sort) in this process's
+    # a lazy h5 source reads in worker processes; a zarr-backed source (add-layer, sort) in this process's
     # threads. A process's RSS does not fall between passes, so once this process has run a pass in its
     # own threads it carries that peak through the worker-process passes that follow.
     h5_scatter = parent + workers(cpus, scatter_band, in_process=False)
-    zarr_scatter = parent + workers(cpus, lognorm_scatter_band, in_process=True)
+    zarr_scatter = parent + workers(cpus, scatter_band, in_process=True)
     place_workers = workers(cpus, place_band, in_process=False)
     sort_threads = max(
         parent + workers(cpus, bucket_nnz * _layout.BUCKET_BYTES_PER_NNZ, in_process=True),
@@ -91,9 +90,9 @@ def _model(cpus: int, nnz: int, worker: int, parent: int) -> dict[str, int]:
     return {
         "convert_csr": parent + workers(busy, copy_band * copy_bpn, in_process=cpus == 1),
         "convert_csc": max(h5_scatter, parent + place_workers),
-        "add_expr_csc": zarr_scatter + place_workers,
-        "sort": sort_threads + place_workers,
-        "append": parent + seam + index_scan,
+        "add_layer_csc": zarr_scatter + place_workers,
+        "sort": sort_threads + place_workers,  # X bucketed, then the csc layer transposed to rows and back
+        "append": max(parent + seam + index_scan, zarr_scatter + place_workers),  # the shared csc layer is rewritten
     }
 
 
@@ -163,29 +162,31 @@ def test_large_store_pipeline_is_memory_bounded(
     got_csc = sparse_dataset(zarr.open_group(str(csc_store), mode="r")["X"])[rows].toarray()
     np.testing.assert_array_equal(got_csc, expected)
 
-    # 3. add-expr --layout csc on the csr store (streamed lognorm CSR -> csc, same engine)
-    _step("add_expr_csc", ["-q", "add-expr", str(csr_store), "--layout", "csc", "--cpus", n])
-    root = zarr.open_group(str(csr_store), mode="r")
-    gexp = sparse_dataset(root["layers/gexp"])[rows].toarray()
-    x_rows = expected.astype(np.float64)
-    sums = x_rows.sum(axis=1)
-    factor = np.divide(1e4, sums, out=np.zeros_like(sums), where=sums > 0)
-    np.testing.assert_allclose(gexp, np.log1p(x_rows * factor[:, None]).astype(np.float32), rtol=1e-4)
+    # 3. add-layer: a csc copy of X on the csr store (streamed CSR -> csc, same engine)
+    _step("add_layer_csc", ["-q", "add-layer", str(csr_store), "--layer", "csc", "--cpus", n])
+    np.testing.assert_array_equal(
+        sparse_dataset(zarr.open_group(str(csr_store), mode="r")["layers/csc"])[rows].toarray(), expected
+    )
 
-    # 4. sort --by cell_type (the csr store carries a lone gexp layer, which sort re-derives)
+    # 4. sort --by cell_type: X and the csc layer move together
     _step("sort", ["-q", "sort", str(csr_store), "-o", str(sorted_store), "--by", "cell_type", "--cpus", n])
     sorted_root = zarr.open_group(str(sorted_store), mode="r")
     codes = read_elem(sorted_root["obs"])["cell_type"].cat.codes.to_numpy()
     assert np.all(np.diff(codes) >= 0), "sort did not produce contiguous cell_type blocks"
-    assert "gexp" in list(sorted_root["layers"])
+    np.testing.assert_array_equal(
+        sparse_dataset(sorted_root["layers/csc"])[rows].toarray(), sparse_dataset(sorted_root["X"])[rows].toarray()
+    )
 
-    # 5. append a 2 000-cell converted store onto the csr store
+    # 5. append a 2 000-cell converted store that also carries the layer: the csc layer is rewritten whole
     assert run_measured(["-q", "convert", str(extra_h5ad), "-o", str(extra_store), "--cpus", n]).rc == 0
+    assert run_measured(["-q", "add-layer", str(extra_store), "--layer", "csc", "--layout", "csr", "--cpus", n]).rc == 0
     _step("append", ["-q", "append", str(csr_store), str(extra_store), "--drop-derived", "--cpus", n])
     appended_root = zarr.open_group(str(csr_store), mode="r")
     assert appended_root["X"].attrs["shape"][0] == N_OBS + N_APPEND
-    appended_tail = sparse_dataset(appended_root["X"])[np.arange(N_OBS, N_OBS + 5)].toarray()
-    np.testing.assert_array_equal(appended_tail, _rows_from_h5ad(extra_h5ad, np.arange(5)))
+    tail = np.arange(N_OBS, N_OBS + 5)
+    expected_tail = _rows_from_h5ad(extra_h5ad, np.arange(5))
+    np.testing.assert_array_equal(sparse_dataset(appended_root["X"])[tail].toarray(), expected_tail)
+    np.testing.assert_array_equal(sparse_dataset(appended_root["layers/csc"])[tail].toarray(), expected_tail)
 
     print(f"\ncpus={cpus}  worker baseline={worker / MB:.0f}MB  parent baseline={parent / MB:.0f}MB  nnz={nnz}")
     print(format_table(results))

@@ -12,7 +12,7 @@ Convert h5ad/10x input(s) into an AnnData zarr (or Icechunk) store
 
 ```text
 usage: annizarr convert [-h] -o OUTPUT [--from {h5ad,10x}] [--eager] [--layout {csr,csc,dense}]
-                        [--cpus CPUS] [--row-chunk N] [--col-chunk N] [--auto-shard]
+                        [--cpus CPUS] [--row-chunk N] [--col-chunk N] [--clevel N] [--auto-shard]
                         [--sort-by COL [COL ...]] [--obs-columns COL [COL ...]]
                         [--consolidate-metadata] [--overwrite] [--ic] [--branch B] [-m MSG]
                         INPUT [INPUT ...]
@@ -29,13 +29,16 @@ options:
                         stream it band by band)
   --layout {csr,csc,dense}
                         output X layout (default: csr)
-  --cpus CPUS           parallel band workers (default: all cores)
+  --cpus CPUS           parallel band workers, up to about 630MB each (default: every core this
+                        process may use, capped by a container CPU limit)
   --row-chunk N         rows per chunk: exact for dense output (default: 2048); for csr, about N
                         cells' worth of nonzeros per chunk (default: 9000000 nonzeros). Not for
                         csc.
   --col-chunk N         columns per chunk: exact for dense output (default: 2048); for csc, about
                         N genes' worth of nonzeros per chunk (default: 9000000 nonzeros). Not for
                         csr.
+  --clevel N            Blosc-zstd compression level for new matrix arrays, 0-9, 0 = uncompressed
+                        (default: 3)
   --auto-shard          shard the anndata-written elements and the 1-D sparse arrays with zarr's
                         automatic shard shape (default: off)
   --sort-by COL [COL ...]
@@ -58,8 +61,8 @@ Rewrite one matrix with new chunking; stream-copy the rest as-is
 
 ```text
 usage: annizarr rechunk [-h] -o OUTPUT [--matrix MATRIX] [--row-chunk N] [--col-chunk N]
-                        [--auto-shard] [--cpus CPUS] [--overwrite] [--consolidate-metadata] [--ic]
-                        [--branch B] [-m MSG]
+                        [--clevel N] [--auto-shard] [--cpus CPUS] [--overwrite]
+                        [--consolidate-metadata] [--ic] [--branch B] [-m MSG]
                         STORE
 
 positional arguments:
@@ -75,9 +78,12 @@ options:
   --col-chunk N         columns per chunk: exact for dense output (default: 2048); for csc, about
                         N genes' worth of nonzeros per chunk (default: 9000000 nonzeros). Not for
                         csr.
+  --clevel N            Blosc-zstd compression level for new matrix arrays, 0-9, 0 = uncompressed
+                        (default: keep the source matrix's)
   --auto-shard          shard the anndata-written elements and the 1-D sparse arrays with zarr's
                         automatic shard shape (default: off)
-  --cpus CPUS           parallel band workers (default: all cores)
+  --cpus CPUS           parallel band workers, up to about 630MB each (default: every core this
+                        process may use, capped by a container CPU limit)
   --overwrite           replace an existing output
   --consolidate-metadata
                         consolidate zarr metadata after writing
@@ -93,8 +99,8 @@ options:
 Physically sort a store's rows by obs column(s) into a new store
 
 ```text
-usage: annizarr sort [-h] -o OUTPUT --by COL [COL ...] [--cpus CPUS] [--auto-shard] [--overwrite]
-                     [--consolidate-metadata] [--ic] [--branch B] [-m MSG]
+usage: annizarr sort [-h] -o OUTPUT --by COL [COL ...] [--cpus CPUS] [--clevel N] [--auto-shard]
+                     [--overwrite] [--consolidate-metadata] [--ic] [--branch B] [-m MSG]
                      STORE
 
 positional arguments:
@@ -104,7 +110,10 @@ options:
   -h, --help            show this help message and exit
   -o, --output OUTPUT   output store path or URI
   --by COL [COL ...]    obs column(s) to sort by, primary key first
-  --cpus CPUS           parallel band workers (default: all cores)
+  --cpus CPUS           parallel band workers, up to about 630MB each (default: every core this
+                        process may use, capped by a container CPU limit)
+  --clevel N            Blosc-zstd compression level for new matrix arrays, 0-9, 0 = uncompressed
+                        (default: 3)
   --auto-shard          shard the anndata-written elements and the 1-D sparse arrays with zarr's
                         automatic shard shape (default: off)
   --overwrite           replace an existing output
@@ -122,8 +131,8 @@ options:
 Append another store's cells onto this one, in place
 
 ```text
-usage: annizarr append [-h] [--drop-derived] [--include-new-obs] [--extend-layers] [--cpus CPUS]
-                       [--branch B] [-m MSG]
+usage: annizarr append [-h] [--drop-derived] [--include-new-obs] [--cpus CPUS] [--branch B]
+                       [-m MSG]
                        STORE CELLS
 
 positional arguments:
@@ -132,47 +141,51 @@ positional arguments:
 
 options:
   -h, --help         show this help message and exit
-  --drop-derived     consent up front to dropping derived obs-aligned elements
-                     (obsm/obsp/incompatible layers); without it you are prompted
+  --drop-derived     consent up front to dropping derived obs-aligned elements (obsm, obsp, layers
+                     only the store carries); layers both stores carry are always appended.
+                     Without it you are prompted
   --include-new-obs  add obs columns only the cells carry, missing on the existing cells; default:
                      leave them out with a warning
-  --extend-layers    extend eligible add-expr CSR layers in place instead of dropping them
-  --cpus CPUS        parallel band workers (default: all cores)
+  --cpus CPUS        parallel band workers, up to about 630MB each (default: every core this
+                     process may use, capped by a container CPU limit)
   --branch B         Icechunk branch to read/write, created off main if missing (default: main);
                      ignored for plain zarr
   -m, --message MSG  Icechunk commit message (default: an auto-generated one naming the op);
                      ignored for plain zarr
 ```
 
-## add-expr
+## add-layer
 
-Add a log-normalized expression layer derived from CSR X
+Copy X (or a layer, or raw/X) into a new layer in another layout
 
 ```text
-usage: annizarr add-expr [-h] [--layout {csr,csc,dense}] [--layer LAYER] [--target-sum TARGET_SUM]
-                         [--row-chunk N] [--col-chunk N] [--auto-shard] [--cpus CPUS]
-                         [--overwrite] [--branch B] [-m MSG]
-                         STORE
+usage: annizarr add-layer [-h] --layer LAYER [--matrix MATRIX] [--layout {csc,csr,dense}]
+                          [--row-chunk N] [--col-chunk N] [--clevel N] [--auto-shard]
+                          [--cpus CPUS] [--overwrite] [--branch B] [-m MSG]
+                          STORE
 
 positional arguments:
   STORE
 
 options:
   -h, --help            show this help message and exit
-  --layout {csr,csc,dense}
-                        on-disk layout of the new layer (default: csc)
-  --layer LAYER         layer name (default: gexp)
-  --target-sum TARGET_SUM
-                        library-size normalization target (default: 10000.0)
+  --layer LAYER         name of the new layer
+  --matrix MATRIX       matrix to copy: X, layers/<name>, or raw/X when raw/var matches var
+                        (default: X)
+  --layout {csc,csr,dense}
+                        on-disk layout of the new layer (default: csc, for fast per-gene reads)
   --row-chunk N         rows per chunk: exact for dense output (default: 2048); for csr, about N
                         cells' worth of nonzeros per chunk (default: 9000000 nonzeros). Not for
                         csc.
   --col-chunk N         columns per chunk: exact for dense output (default: 2048); for csc, about
                         N genes' worth of nonzeros per chunk (default: 9000000 nonzeros). Not for
                         csr.
+  --clevel N            Blosc-zstd compression level for new matrix arrays, 0-9, 0 = uncompressed
+                        (default: 3)
   --auto-shard          shard the anndata-written elements and the 1-D sparse arrays with zarr's
                         automatic shard shape (default: off)
-  --cpus CPUS           parallel band workers (default: all cores)
+  --cpus CPUS           parallel band workers, up to about 630MB each (default: every core this
+                        process may use, capped by a container CPU limit)
   --overwrite           replace an existing output
   --branch B            Icechunk branch to read/write, created off main if missing (default:
                         main); ignored for plain zarr

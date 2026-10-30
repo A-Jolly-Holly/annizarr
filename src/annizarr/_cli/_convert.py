@@ -7,6 +7,7 @@ from annizarr._cli._args import (
     add_autoshard_arg,
     add_branch_arg,
     add_chunk_args,
+    add_clevel_arg,
     add_consolidate_arg,
     add_cpus_arg,
     add_ic_arg,
@@ -49,6 +50,7 @@ def add_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) 
     )
     add_cpus_arg(p)
     add_chunk_args(p)
+    add_clevel_arg(p)
     add_autoshard_arg(p)
     p.add_argument(
         "--sort-by",

@@ -17,12 +17,11 @@ from anndata.io import read_elem, sparse_dataset
 import annizarr as az
 from annizarr._storage import open_input_group, open_output_store
 from annizarr.config import AppConfig, ChunkConfig, GroupingConfig, IOConfig
-from annizarr.errors import RepoError, StorageError
-from annizarr.ops import add_expr, append, convert_h5ad, sort
+from annizarr.errors import ConversionError, RepoError, StorageError
+from annizarr.ops import add_layer, append, convert_h5ad, sort
 from helpers import (
     assert_anndata_readable,
     cfg,
-    expected_lognorm,
     make_adata,
     make_h5ad,
     make_labelled_h5ad,
@@ -68,35 +67,35 @@ def _icechunk() -> None:
 
 @pytestmark_ic
 def test_lifecycle_is_one_commit_per_op(tmp_path: Path) -> None:
-    """convert, add-expr, append and sort each commit exactly once; sort re-derives a lone gexp
-    layer inside its own commit; a plain-zarr result carries no snapshot id."""
+    """convert, add-layer, append and sort each commit exactly once, including an append that
+    rewrites a CSC layer inside the session; a plain-zarr result carries no snapshot id."""
     from annizarr.ic import Repo
 
-    a, b = make_adata(n_obs=30, seed=0), make_adata(n_obs=12, seed=1)
+    a, b, c = make_adata(n_obs=30, seed=0), make_adata(n_obs=12, seed=1), make_adata(n_obs=7, seed=2)
     repo_path = tmp_path / "repo.icechunk"
     r_convert = convert_h5ad(
         str(make_h5ad(tmp_path, "a.h5ad", adata=a)), output=str(repo_path), cfg=cfg(backend="icechunk")
     )
-    r_expr = add_expr(str(repo_path), layout="csr", cfg=cfg(backend="icechunk"))
-    cells = make_store(tmp_path, "b.zarr", adata=b)
-    r_append = append(str(repo_path), cells=str(cells), drop_derived=True, cfg=cfg())  # icechunk auto-detected
-    add_expr(str(repo_path), layout="csc", cfg=cfg())
+    r_layer = add_layer(str(repo_path), layer="copy", layout="csr", cfg=cfg(backend="icechunk"))
+    r_append = append(str(repo_path), cells=str(make_store(tmp_path, "b.zarr", adata=b)), drop_derived=True, cfg=cfg())
+    add_layer(str(repo_path), layer="by_gene", cfg=cfg())  # icechunk auto-detected
+    cells_c = make_store(tmp_path, "c.zarr", adata=c)
+    add_layer(str(cells_c), layer="by_gene", layout="csr", cfg=cfg())
+    r_rewrite = append(str(repo_path), cells=str(cells_c), drop_derived=True, cfg=cfg())
     sorted_path = tmp_path / "sorted.icechunk"
     r_sort = sort(str(repo_path), output=str(sorted_path), by=("cell_type",), cfg=cfg(backend="icechunk"))
-    assert all(isinstance(r.snapshot_id, str) and r.snapshot_id for r in (r_convert, r_expr, r_append, r_sort))
+    results = (r_convert, r_layer, r_append, r_rewrite, r_sort)
+    assert all(isinstance(r.snapshot_id, str) and r.snapshot_id for r in results)
     plain = convert_h5ad(str(tmp_path / "a.h5ad"), output=str(tmp_path / "plain.zarr"), cfg=cfg())
     assert plain.snapshot_id is None  # a plain-zarr result carries no snapshot id
 
     log = Repo(str(repo_path)).log(branch="main")
-    assert len(log) == 5 and log[-1].message == "Repository initialized"
-    assert [s.id for s in log[1:4]] == [r_append.snapshot_id, r_expr.snapshot_id, r_convert.snapshot_id]
-    assert (
-        "annizarr append" in log[1].message
-        and "annizarr add-expr csr" in log[2].message
-        and "annizarr convert" in log[3].message
-    )
-    assert log[1].metadata == {"annizarr": az.__version__, "op": "append", "cells": "b.zarr"}
-    assert log[3].metadata == {"annizarr": az.__version__, "op": "convert", "source": "a.h5ad"}
+    assert len(log) == 6 and log[-1].message == "Repository initialized"
+    assert [s.id for s in log[2:5]] == [r_append.snapshot_id, r_layer.snapshot_id, r_convert.snapshot_id]
+    assert log[0].id == r_rewrite.snapshot_id
+    assert "annizarr add-layer X → layers/copy (csr)" in log[3].message and "annizarr convert" in log[4].message
+    assert log[2].metadata == {"annizarr": az.__version__, "op": "append", "cells": "b.zarr"}
+    assert log[3].metadata == {"annizarr": az.__version__, "op": "add-layer", "matrix": "X", "layout": "csr"}
     sorted_log = Repo(str(sorted_path)).log(branch="main")
     assert (
         len(sorted_log) == 2 and sorted_log[0].id == r_sort.snapshot_id and "sort by cell_type" in sorted_log[0].message
@@ -105,12 +104,13 @@ def test_lifecycle_is_one_commit_per_op(tmp_path: Path) -> None:
     root = open_input_group(str(sorted_path))
     assert_anndata_readable(root)
     obs = read_elem(root["obs"])
-    assert len(obs) == 42 and (np.diff(obs["cell_type"].cat.codes.to_numpy()) >= 0).all()
+    assert len(obs) == 49 and (np.diff(obs["cell_type"].cat.codes.to_numpy()) >= 0).all()
     x = sparse_dataset(root["X"])[:]
-    by_name = {n: r for src in (a, b) for n, r in zip(src.obs_names, src.X.toarray(), strict=True)}
+    by_name = {n: r for src in (a, b, c) for n, r in zip(src.obs_names, src.X.toarray(), strict=True)}
     for i, n in enumerate(obs.index):
         np.testing.assert_allclose(x[i].toarray().ravel(), by_name[n])
-    np.testing.assert_allclose(sparse_dataset(root["layers/gexp"])[:].toarray(), expected_lognorm(x), rtol=1e-5)
+    assert root["layers/by_gene"].attrs["encoding-type"] == "csc_matrix"
+    np.testing.assert_array_equal(sparse_dataset(root["layers/by_gene"])[:].toarray(), x.toarray())
 
 
 @pytestmark_ic
@@ -122,16 +122,16 @@ def test_branches_messages_and_snapshots(tmp_path: Path) -> None:
     r_convert = convert_h5ad(str(h5), output=str(repo_path), cfg=cfg(backend="icechunk"), message="a custom message")
     assert Repo(str(repo_path)).log(branch="main")[0].message == "a custom message"
 
-    r_dev = add_expr(str(repo_path), layout="csr", cfg=cfg(), branch="dev")  # created off main's tip
+    r_dev = add_layer(str(repo_path), layer="copy", cfg=cfg(), branch="dev")  # created off main's tip
     assert Repo(str(repo_path), branch="main").log(branch="main")[0].id == r_convert.snapshot_id
     dev_log = Repo(str(repo_path), branch="dev").log(branch="dev")
     assert dev_log[0].id == r_dev.snapshot_id and r_convert.snapshot_id in {s.id for s in dev_log}
 
-    r_main = add_expr(str(repo_path), layout="csr", cfg=cfg())
+    r_main = add_layer(str(repo_path), layer="copy", cfg=cfg())
     assert r_main.snapshot_id is not None
     old = open_input_group(str(repo_path), snapshot_id=r_convert.snapshot_id)
-    assert "gexp" not in (list(old["layers"]) if "layers" in old else [])
-    assert "gexp" in list(open_input_group(str(repo_path))["layers"])
+    assert "copy" not in (list(old["layers"]) if "layers" in old else [])
+    assert "copy" in list(open_input_group(str(repo_path))["layers"])
 
     out = open_output_store(tmp_path / "idem.icechunk", AppConfig(io=IOConfig(backend="icechunk")))
     out.root.attrs.update({"encoding-type": "anndata", "encoding-version": "0.1.0"})
@@ -211,14 +211,14 @@ def test_a_repo_is_a_store(tmp_path: Path) -> None:
     main_tip = Repo(str(repo_path)).log()[0].id
     repo = Repo(str(repo_path))
     repo.checkout("dev", create=True)
-    result = add_expr(repo, layout="csr", cfg=cfg())
+    result = add_layer(repo, layer="copy", cfg=cfg())
     assert result.path == str(repo_path) and repo.branch == "dev" and not repo.dirty
     assert repo.log()[0].id == result.snapshot_id and Repo(str(repo_path)).log()[0].id == main_tip
 
     cells = make_store(tmp_path, "b.zarr", adata=make_adata(n_obs=12, seed=1))
-    assert plan_append(repo, cells=str(cells)).extendable_layers == ("gexp",)
-    del repo.open_zarr("w")["layers/gexp"]
-    assert repo.dirty and plan_append(repo, cells=str(cells)).extendable_layers == ()
+    assert plan_append(repo, cells=str(cells)).drop_layers == ("copy",)
+    del repo.open_zarr("w")["layers/copy"]
+    assert repo.dirty and plan_append(repo, cells=str(cells)).drop_layers == ()
 
 
 @pytestmark_ic
@@ -232,19 +232,22 @@ def test_deferred_ops_land_in_the_callers_commit(tmp_path: Path) -> None:
     repo = Repo(str(repo_path))
     n_before = len(repo.log())
     r_append = append(repo, cells=str(cells), drop_derived=True, cfg=cfg(), commit=False)
-    r_expr = add_expr(repo, layout="csr", cfg=cfg(), commit=False)
-    assert r_append.snapshot_id is None and r_expr.snapshot_id is None and repo.dirty
+    r_layer = add_layer(repo, layer="copy", cfg=cfg(), commit=False)
+    assert r_append.snapshot_id is None and r_layer.snapshot_id is None and repo.dirty
     repo.commit("ingest", metadata={"run": "42"})
     log = repo.log()
     assert len(log) == n_before + 1 and log[0].metadata == {"run": "42"}
     root = open_input_group(str(repo_path))
-    assert root["X"].attrs["shape"][0] == 32 and "gexp" in root["layers"]
+    assert root["X"].attrs["shape"][0] == 32 and "copy" in root["layers"]
 
+    with pytest.raises(ConversionError, match="already exists"):  # refused before the session is touched
+        add_layer(repo, layer="copy", cfg=cfg(), commit=False)
+    assert not repo.dirty
     with pytest.raises(StorageError, match="needs a Repo"):
-        add_expr(str(repo_path), cfg=cfg(), commit=False)
+        add_layer(str(repo_path), layer="other", cfg=cfg(), commit=False)
     plain = make_store(tmp_path, "plain.zarr", adata=make_adata(n_obs=5, seed=2))
     with pytest.raises(StorageError, match="only applies to Icechunk"):
-        add_expr(str(plain), cfg=cfg(), commit=False)
+        add_layer(str(plain), layer="other", cfg=cfg(), commit=False)
 
 
 @pytest.fixture

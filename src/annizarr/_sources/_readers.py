@@ -29,13 +29,14 @@ __all__ = [
     "CSRH5Reader",
     "CSRMemoryReader",
     "CSRZarrReader",
+    "CastReader",
     "ConcatReader",
     "DenseBand",
     "DenseH5Reader",
     "DenseMemoryReader",
     "DenseZarrReader",
     "Reader",
-    "ScaledReader",
+    "RemapColumnsReader",
     "TenxCSRReader",
     "as_reader",
 ]
@@ -138,7 +139,7 @@ class Reader(ABC):
     @property
     def band_bytes_per_nnz(self) -> int:
         # bytes this reader holds per nonzero while producing one flat band: the band itself
-        # unless a transform adds temporaries (see ScaledReader)
+        # unless a transform adds temporaries
         return self.dtype.itemsize + 4
 
     @abstractmethod
@@ -957,17 +958,11 @@ class CSRFileReader(_CSRReaderMixin):
         return self._indices
 
 
-class ScaledReader(Reader):
-    """A CSR-like reader whose values are log-normalised per row: ``log1p(x * factor[row])`` as float32.
-
-    Wraps any reader and applies the transform band by band, so every writer inherits its
-    memory bound and parallelism; ``factors`` come from :func:`annizarr.ops._expr.lognorm_factors`.
-    """
-
-    def __init__(self, inner: Reader, factors: NDArray[np.float64]) -> None:
+class _WrappedReader(Reader):
+    # a per-band transform over another reader: geometry, parallel mode and grain are the inner's
+    def __init__(self, inner: Reader) -> None:
         super().__init__()
         self._inner = inner
-        self._factors = np.asarray(factors, dtype=np.float64)
         self.cpus = inner.cpus
 
     @property
@@ -976,7 +971,7 @@ class ScaledReader(Reader):
 
     @property
     def dtype(self) -> np.dtype[Any]:
-        return np.dtype(np.float32)
+        return self._inner.dtype
 
     @property
     def lazy(self) -> bool:
@@ -993,52 +988,93 @@ class ScaledReader(Reader):
     def _compute_indptr(self) -> NDArray[np.int64]:
         return self._inner.indptr
 
-    @property
-    def band_bytes_per_nnz(self) -> int:
-        return int(_layout.LOGNORM_BYTES_PER_NNZ)
-
     def _row_bytes(self) -> int:
-        return max(1, self.nnz // max(1, self.shape[0])) * _layout.LOGNORM_BYTES_PER_NNZ
-
-    def _scale(self, data: NDArray[Any], per_row_counts: NDArray[Any], r0: int, r1: int) -> NDArray[np.float32]:
-        # in place on one float64 copy: see _layout.LOGNORM_BYTES_PER_NNZ
-        vals = data.astype(np.float64)
-        vals *= np.repeat(self._factors[r0:r1], per_row_counts)
-        np.log1p(vals, out=vals)
-        return vals.astype(np.float32)
-
-    def flat(self, s0: int, s1: int) -> tuple[NDArray[Any], NDArray[np.int32]]:
-        data, indices = self._inner.flat(s0, s1)
-        return self._scale_flat(data, s0, s1), indices
-
-    def flat_data(self, s0: int, s1: int) -> NDArray[Any]:
-        return self._scale_flat(self._inner.flat_data(s0, s1), s0, s1)
-
-    def flat_indices(self, s0: int, s1: int) -> NDArray[np.int32]:
-        return self._inner.flat_indices(s0, s1)
-
-    def _scale_flat(self, data: NDArray[Any], s0: int, s1: int) -> NDArray[np.float32]:
-        if s1 <= s0:
-            return np.empty(0, dtype=np.float32)
-        indptr = self.indptr
-        r0 = max(int(np.searchsorted(indptr, s0, side="right")) - 1, 0)
-        r1 = int(np.searchsorted(indptr, s1, side="left"))
-        starts = np.clip(indptr[r0:r1], s0, s1)
-        ends = np.clip(indptr[r0 + 1 : r1 + 1], s0, s1)
-        return self._scale(data, ends - starts, r0, r1)
-
-    def csr_rows(self, r0: int, r1: int) -> sp.csr_matrix:
-        import scipy.sparse as sp
-
-        rows = self._inner.csr_rows(r0, r1)
-        vals = self._scale(np.asarray(rows.data), np.diff(rows.indptr), r0, r1)
-        return sp.csr_matrix((vals, rows.indices, rows.indptr), shape=rows.shape)
+        return self._inner._row_bytes()
 
     def dense_band(self, r0: int, r1: int) -> DenseBand:
         return _CSRBand(self.csr_rows(r0, r1))
 
     def close(self) -> None:
         self._inner.close()
+
+
+class CastReader(_WrappedReader):
+    """Another reader's values cast to ``dtype`` band by band (append's lossless widening)."""
+
+    def __init__(self, inner: Reader, dtype: np.dtype[Any]) -> None:
+        super().__init__(inner)
+        self._dtype_val = np.dtype(dtype)
+
+    @property
+    def dtype(self) -> np.dtype[Any]:
+        return self._dtype_val
+
+    @property
+    def band_bytes_per_nnz(self) -> int:
+        return self._inner.band_bytes_per_nnz + self._dtype_val.itemsize  # the cast copy
+
+    def flat(self, s0: int, s1: int) -> tuple[NDArray[Any], NDArray[np.int32]]:
+        data, indices = self._inner.flat(s0, s1)
+        return data.astype(self._dtype_val, copy=False), indices
+
+    def flat_data(self, s0: int, s1: int) -> NDArray[Any]:
+        return self._inner.flat_data(s0, s1).astype(self._dtype_val, copy=False)
+
+    def flat_indices(self, s0: int, s1: int) -> NDArray[np.int32]:
+        return self._inner.flat_indices(s0, s1)
+
+    def csr_rows(self, r0: int, r1: int) -> sp.csr_matrix:
+        return self._inner.csr_rows(r0, r1).astype(self._dtype_val, copy=False)
+
+    def dense_band(self, r0: int, r1: int) -> DenseBand:
+        return _CastBand(self._inner.dense_band(r0, r1), self._dtype_val)
+
+
+class _CastBand:
+    __slots__ = ("_band", "_dtype")
+
+    def __init__(self, band: DenseBand, dtype: np.dtype[Any]) -> None:
+        self._band = band
+        self._dtype = dtype
+
+    def tile(self, c0: int, c1: int) -> NDArray[Any]:
+        return self._band.tile(c0, c1).astype(self._dtype, copy=False)
+
+
+class RemapColumnsReader(_WrappedReader):
+    """Another reader with column ``j`` moved to ``new_index[j]``, each row's entries re-sorted.
+
+    A row permutation of a cells x cells graph (sort's ``obsp``) moves its columns too; the rows go
+    through the sort buckets and this renumbers the columns as each band is read. A flat band is
+    read as the whole rows it touches, so a row cut by the band edge is still sorted as a whole.
+    """
+
+    def __init__(self, inner: Reader, new_index: NDArray[np.int64]) -> None:
+        super().__init__(inner)
+        self._new_index = np.asarray(new_index, dtype=np.int32)
+
+    @property
+    def band_bytes_per_nnz(self) -> int:
+        return self._inner.band_bytes_per_nnz + 12  # remapped int32 indices + int64 sort order
+
+    def csr_rows(self, r0: int, r1: int) -> sp.csr_matrix:
+        import scipy.sparse as sp
+
+        rows = self._inner.csr_rows(r0, r1)
+        out = sp.csr_matrix((rows.data, self._new_index[rows.indices], rows.indptr), shape=rows.shape)
+        out.has_sorted_indices = False
+        out.sort_indices()
+        return out
+
+    def flat(self, s0: int, s1: int) -> tuple[NDArray[Any], NDArray[np.int32]]:
+        if s1 <= s0:
+            return np.empty(0, dtype=self.dtype), np.empty(0, dtype=np.int32)
+        indptr = self.indptr
+        r0 = int(np.searchsorted(indptr, s0, side="right")) - 1
+        r1 = int(np.searchsorted(indptr, s1, side="left"))
+        rows = self.csr_rows(r0, r1)
+        lo, hi = s0 - int(indptr[r0]), s1 - int(indptr[r0])
+        return np.asarray(rows.data[lo:hi]), np.asarray(rows.indices[lo:hi], dtype=np.int32)
 
 
 def _is_anndata_sparse_dataset(matrix: Any) -> bool:

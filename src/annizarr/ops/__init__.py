@@ -6,7 +6,7 @@ from annizarr.ops._convert import convert
 from annizarr.ops._convert import convert_10x_h5 as convert_10x_h5
 from annizarr.ops._convert import convert_adata as convert_adata
 from annizarr.ops._convert import convert_h5ad as convert_h5ad
-from annizarr.ops._expr import add_expr
+from annizarr.ops._layer import add_layer
 from annizarr.ops._rechunk import rechunk
 from annizarr.ops._result import AppendPlan, OpResult
 from annizarr.ops._sort import sort
@@ -16,7 +16,7 @@ from annizarr.ops._sort import sort
 __all__ = [
     "AppendPlan",
     "OpResult",
-    "add_expr",
+    "add_layer",
     "append",
     "convert",
     "plan_append",

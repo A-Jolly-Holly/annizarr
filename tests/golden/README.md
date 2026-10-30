@@ -46,3 +46,7 @@ fixture instead of the plain one), `csr_backed_small_flat`,
 `dense_from_sparse_backed_small_chunks`, and `dense_sharded_cpus2` are new combinations of
 parameters and are new by definition. The other thirteen previous cases were folded into
 these nine or dropped as redundant with a library-level test.
+
+**2026-10-30 regeneration** (0.2.4, default compression level 5 → 3): before regenerating, all
+nine cases were re-run with `DEFAULT_CLEVEL` set back to 5 and matched the previous tarballs
+byte for byte, so the Blosc level in `zarr.json` and in every chunk is the only change.

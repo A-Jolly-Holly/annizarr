@@ -39,7 +39,10 @@ result.n_obs, result.n_vars, result.snapshot_id  # snapshot_id is None for plain
 - `--row-chunk N`, `--col-chunk N`: chunk shape. Exact for dense (2048 by 2048 by default); for
   sparse, about N cells (CSR) or N genes (CSC) per chunk. The other axis is a usage error for sparse
   output.
-- `--cpus N`: parallel band workers. Default all cores; lower it to leave headroom on a shared host.
+- `--cpus N`: parallel band workers, up to about 630 MB each. Default: every core this process may
+  use (its affinity, capped by a container CPU limit); lower it on a host with less memory per core
+  or to leave headroom on a shared host.
+- `--clevel N`: Blosc zstd compression level of every matrix written, 0 to 9. Default 3.
 - `--eager`: load the whole input first instead of streaming it. Faster for small files.
 - `--sort-by COL [COL ...]`: physically order rows by obs columns while converting, primary key first.
   Streams for CSR output; dense or CSC output, and inputs with layers, raw or obsp, need `--eager`.

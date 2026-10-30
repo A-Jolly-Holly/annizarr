@@ -34,7 +34,7 @@ annizarr convert sample.h5ad -o repo.icechunk --ic -m "initial import"
 `rechunk` rewrites one matrix with new chunking and streams everything else through unchanged.<br>
 `sort` physically orders rows by obs column(s) into a new store.<br> 
 `append` adds cells to an existing zarr/ic store; it prompts before dropping obsm/obsp/layers (`--drop-derived` consents up front)<br>
-`add-expr` adds a log-normalized layer (`layers/gexp`) derived from X/. Csc by default for fast column reads
+`add-layer` copies X (or a layer, or raw/X) into a new layer in another layout, values untouched; CSC by default for fast gene reads
 
 ```bash
 annizarr rechunk merged.zarr -o rechunked.zarr --row-chunk 2000
@@ -42,8 +42,8 @@ annizarr rechunk merged.zarr -o rechunked.zarr --row-chunk 2000
 annizarr sort merged.zarr -o sorted.zarr --by cell_type
 annizarr append sorted.zarr more_cells.zarr --drop-derived
 
-annizarr add-expr merged.zarr --layout csr
-annizarr add-expr repo.icechunk --layout csr --branch dev -m "add lognorm layer"
+annizarr add-layer merged.zarr --layer counts_csc
+annizarr add-layer repo.icechunk --layer counts_csc --branch dev -m "csc copy for gene reads"
 ```
 
 Icechunk history, branches, cherry-picks live in the Python API `annizarr.Repo` below
@@ -85,16 +85,19 @@ core unless `--cpus` says otherwise.
 
 Some of the main options; the docs have all of them:
 
-- `--cpus N` — parallel band workers (default: all cores). Every command.
+- `--cpus N` — parallel band workers, up to about 630 MB each (default: every core this process may
+  use, capped by a container CPU limit). Every command.
+- `--clevel N` — Blosc zstd compression level, 0 to 9 (default: 3). `convert`, `sort`, `add-layer`;
+  `rechunk` keeps the source's level unless given.
 - `--layout csr|csc|dense` — on-disk layout of the matrix being written. Default `csr` for X on
-  `convert`, `csc` for the `add-expr` layer. CSR suits row-wise access, CSC and dense column queries.
+  `convert`, `csc` for an `add-layer` copy. CSR suits row-wise access, CSC and dense column queries.
 - `--row-chunk N`, `--col-chunk N` — chunk shape. Exact rows and columns for dense; for sparse, about
   N cells (csr) or N genes (csc) per chunk, sized from the average nonzeros. Defaults: 2048 for dense,
-  about 9,000,000 nonzeros for sparse. `convert`, `rechunk`, `add-expr`.
+  about 9,000,000 nonzeros for sparse. `convert`, `rechunk`, `add-layer`.
 - `--auto-shard` — shard the 1-D sparse arrays and anndata-written elements with zarr's automatic
   shard shape (default: off). Every command but `append`.
 - `--ic` — write through an Icechunk repository; `--branch B` and `-m MSG` pick the branch and commit
-  message. `append` and `add-expr` detect an existing repo on their own. `convert`, `rechunk`, `sort`.
+  message. `append` and `add-layer` detect an existing repo on their own. `convert`, `rechunk`, `sort`.
 - `--sort-by COL…` on `convert` / `--by COL…` on `sort` — physically order rows by obs columns,
   primary key first
 

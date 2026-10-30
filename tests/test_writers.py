@@ -192,10 +192,9 @@ def test_write_unit_above_the_band_budget_warns(
     assert any("above the 0MB band budget" in r.message for r in caplog.records)
 
 
-def test_string_columns_are_written_as_nullable_string_arrays(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_string_columns_are_written_as_nullable_string_arrays(tmp_path: Path) -> None:
     # the encoding must follow neither the dtype the installed pandas infers for text nor anndata's
     # allow_write_nullable_strings default (False on 0.12, where it refuses pandas string arrays)
-    monkeypatch.setattr(ad.settings, "allow_write_nullable_strings", False)
     obs = pd.DataFrame(
         {
             "barcode": [f"bc{i}" for i in range(8)],  # all distinct: stays a string
@@ -208,9 +207,9 @@ def test_string_columns_are_written_as_nullable_string_arrays(tmp_path: Path, mo
         X=sp.csr_matrix(random_dense(8, 6, seed=11)), obs=obs, var=pd.DataFrame(index=[f"g{i}" for i in range(6)])
     )
     out = tmp_path / "strings.zarr"
-    convert_adata(adata, output=out, cfg=_cfg("csr", cpus=2))
-
-    assert ad.settings.allow_write_nullable_strings is False  # ours for the write only, then restored
+    with ad.settings.override(allow_write_nullable_strings=False):
+        convert_adata(adata, output=out, cfg=_cfg("csr", cpus=2))
+        assert ad.settings.allow_write_nullable_strings is False  # ours for the write only, then restored
     obs_group = zarr.open_group(str(out), mode="r")["obs"]
     for key in ("_index", "barcode"):
         assert obs_group[key].attrs["encoding-type"] == "nullable-string-array"

@@ -118,7 +118,7 @@ def _write_compressed(
             dtype=reader.dtype,
             chunks=(flat_chunk,),
             shards=shards,
-            compressors=x_compressors(),
+            compressors=x_compressors(cfg.chunks.clevel),
             overwrite=True,
         )
         indices_arr = sp_group.require_array(
@@ -127,7 +127,7 @@ def _write_compressed(
             dtype=indices_dtype,
             chunks=(flat_chunk,),
             shards=shards,
-            compressors=x_compressors(),
+            compressors=x_compressors(cfg.chunks.clevel),
             overwrite=True,
         )
     indptr_dtype = np.int64 if nnz_total > np.iinfo(np.int32).max else np.int32
@@ -330,10 +330,10 @@ class _Placer:
 
 
 def _codec_threads() -> int:
-    import os
+    from annizarr._core._system import usable_cpus
 
     configured = zarr.config.get("threading.max_workers")
-    return int(configured) if configured else (os.cpu_count() or 1)
+    return int(configured) if configured else usable_cpus()
 
 
 def _output_bands(cell_nnz: NDArray[np.int64], max_nnz: int, cpus: int) -> list[tuple[int, int]]:
@@ -410,7 +410,7 @@ def write_transposed_sparse(
             dtype=value_dtype,
             chunks=(flat_chunk,),
             shards=shards,
-            compressors=x_compressors(),
+            compressors=x_compressors(cfg.chunks.clevel),
             overwrite=True,
         )
         indices_arr = sp_group.require_array(
@@ -419,7 +419,7 @@ def write_transposed_sparse(
             dtype=indices_dtype,
             chunks=(flat_chunk,),
             shards=shards,
-            compressors=x_compressors(),
+            compressors=x_compressors(cfg.chunks.clevel),
             overwrite=True,
         )
     indptr_arr = sp_group.require_array(

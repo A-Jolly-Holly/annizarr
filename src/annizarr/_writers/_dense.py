@@ -76,7 +76,7 @@ def write_dense(group: zarr.Group, key: str, reader: Reader, cfg: AppConfig) -> 
         dtype=reader.dtype,
         chunks=layout.chunks,
         shards=layout.shards,
-        compressors=x_compressors(),
+        compressors=x_compressors(cfg.chunks.clevel),
         overwrite=True,
     )
     set_array_attrs(zarr_arr)

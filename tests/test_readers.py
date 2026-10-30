@@ -15,6 +15,7 @@ import zarr
 
 import annizarr._core._layout as _layout
 from annizarr._sources._readers import (
+    CastReader,
     ConcatReader,
     CSRFileReader,
     CSRH5Reader,
@@ -23,14 +24,14 @@ from annizarr._sources._readers import (
     DenseH5Reader,
     DenseMemoryReader,
     DenseZarrReader,
-    ScaledReader,
+    RemapColumnsReader,
     TenxCSRReader,
     as_reader,
 )
 from annizarr._writers._buckets import Buckets
 from annizarr.config import AppConfig
 from annizarr.errors import ConversionError
-from helpers import expected_lognorm, make_10x_v2_h5, make_10x_v3_h5
+from helpers import make_10x_v2_h5, make_10x_v3_h5
 
 DENSE = np.array(
     [[1, 0, 2, 0, 3], [0, 4, 0, 0, 5], [0, 0, 0, 0, 0], [6, 0, 7, 0, 0], [0, 8, 0, 0, 9], [10, 0, 0, 0, 11]],
@@ -161,27 +162,42 @@ def test_as_reader_rejects_non_matrix_inputs() -> None:
     assert as_reader(DENSE, cfg=cfg).cpus == cfg.chunks.cpus
 
 
-@pytest.mark.parametrize("kind", ["csr_memory", "csr_h5", "csr_zarr"])
-def test_scaled_reader_applies_per_row_factors_on_every_access_path(tmp_path: Path, kind: str) -> None:
-    """Flat segments that start and end mid-row, csr rows and dense tiles all match the formula,
-    including the empty row (factor 0) and the empty column."""
-    from annizarr.ops._expr import lognorm_factors
-
+@pytest.mark.parametrize("kind", ["dense_zarr", "csr_h5", "csr_zarr"])
+def test_cast_reader_widens_every_access_path(tmp_path: Path, kind: str) -> None:
     inner = BUILDERS[kind](tmp_path)
-    inner.cpus = 2
-    reader = ScaledReader(inner, lognorm_factors(inner, 100.0))
-    expected = expected_lognorm(DENSE, 100.0)
-    assert reader.shape == CSR.shape and reader.dtype == np.float32 and reader.lazy == inner.lazy
-    assert reader.band_bytes_per_nnz == _layout.LOGNORM_BYTES_PER_NNZ
-    np.testing.assert_allclose(reader.csr_rows(0, 6).toarray(), expected, rtol=1e-6)
-    np.testing.assert_allclose(reader.dense_band(0, 6).tile(1, 4), expected[:, 1:4], rtol=1e-6)
-    flat_expected = sp.csr_matrix(expected).data
-    for s0, s1 in [(0, CSR.nnz), (1, 4), (3, 9), (8, 11), (5, 5)]:
-        data, idx = reader.flat(s0, s1)
-        np.testing.assert_allclose(data, flat_expected[s0:s1], rtol=1e-6)
-        np.testing.assert_array_equal(idx, CSR.indices[s0:s1])
-        np.testing.assert_allclose(reader.flat_data(s0, s1), flat_expected[s0:s1], rtol=1e-6)
+    reader = CastReader(inner, np.dtype(np.float64))
+    assert reader.dtype == np.float64 and reader.shape == DENSE.shape and reader.lazy == inner.lazy
+    assert reader.band_bytes_per_nnz == inner.band_bytes_per_nnz + 8
+    np.testing.assert_array_equal(reader.csr_rows(1, 4).toarray(), DENSE[1:4])
+    assert (
+        reader.csr_rows(1, 4).dtype
+        == reader.dense_block(1, 4, 1, 4).dtype
+        == reader.flat_data(0, 3).dtype
+        == np.float64
+    )
+    np.testing.assert_array_equal(reader.dense_block(1, 4, 1, 4), DENSE[1:4, 1:4])
+    data, idx = reader.flat(3, 8)
+    np.testing.assert_array_equal(data, CSR.data[3:8])
+    np.testing.assert_array_equal(idx, CSR.indices[3:8])
     reader.close()
+
+
+def test_remap_columns_reader_moves_columns_and_keeps_rows_sorted(tmp_path: Path) -> None:
+    """A flat band cut mid-row is still the whole row's remapped, re-sorted entries sliced to the band."""
+    new_index = np.array([4, 2, 0, 1, 3])  # column j moves to new_index[j]
+    expected = np.zeros_like(DENSE)
+    expected[:, new_index] = DENSE
+    expected_csr = sp.csr_matrix(expected)
+    for kind in ("csr_memory", "csr_zarr"):
+        reader = RemapColumnsReader(BUILDERS[kind](tmp_path), new_index)
+        np.testing.assert_array_equal(reader.csr_rows(0, 6).toarray(), expected)
+        assert reader.csr_rows(0, 6).has_sorted_indices
+        np.testing.assert_array_equal(reader.dense_block(1, 5, 0, 5), expected[1:5])
+        for s0, s1 in [(0, CSR.nnz), (1, 4), (3, 9), (8, 11), (5, 5)]:
+            data, idx = reader.flat(s0, s1)
+            np.testing.assert_array_equal(data, expected_csr.data[s0:s1])
+            np.testing.assert_array_equal(idx, expected_csr.indices[s0:s1])
+        reader.close()
 
 
 def test_tenx_reader_matches_the_eager_loader_with_and_without_a_feature_mask(tmp_path: Path) -> None:

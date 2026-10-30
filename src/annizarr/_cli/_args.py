@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 
 from annizarr._core._config import DENSE_CHUNK, AppConfig, ChunkConfig, apply_cli_overrides
+from annizarr._core._layout import DEFAULT_CLEVEL
 
 
 def add_overwrite_arg(parser: argparse.ArgumentParser) -> None:
@@ -42,7 +43,22 @@ def add_message_arg(parser: argparse.ArgumentParser) -> None:
 
 
 def add_cpus_arg(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--cpus", type=int, help="parallel band workers (default: all cores)")
+    parser.add_argument(
+        "--cpus",
+        type=int,
+        help="parallel band workers, up to about 630MB each (default: every core this process may use, "
+        "capped by a container CPU limit)",
+    )
+
+
+def add_clevel_arg(parser: argparse.ArgumentParser, *, keeps_source: bool = False) -> None:
+    default = "keep the source matrix's" if keeps_source else str(DEFAULT_CLEVEL)
+    parser.add_argument(
+        "--clevel",
+        type=int,
+        metavar="N",
+        help=f"Blosc-zstd compression level for new matrix arrays, 0-9, 0 = uncompressed (default: {default})",
+    )
 
 
 def add_chunk_args(parser: argparse.ArgumentParser) -> None:
@@ -75,7 +91,7 @@ def add_autoshard_arg(parser: argparse.ArgumentParser) -> None:
 
 
 def reject_off_axis_chunks(parser: argparse.ArgumentParser, args: argparse.Namespace, layout: str) -> None:
-    # convert/add-expr know the output layout up front, so a chunk flag for the wrong sparse axis
+    # convert/add-layer know the output layout up front, so a chunk flag for the wrong sparse axis
     # is a usage error here; rechunk learns the layout from the store and only warns at write time
     if layout == "csr" and getattr(args, "col_chunk", None) is not None:
         parser.error("--col-chunk does not apply to csr output (chunks follow rows); use --row-chunk")
@@ -94,6 +110,7 @@ def build_config(args: argparse.Namespace) -> AppConfig:
         row_chunk=getattr(args, "row_chunk", None),
         col_chunk=getattr(args, "col_chunk", None),
         auto_shard=getattr(args, "auto_shard", None),
+        clevel=getattr(args, "clevel", None),
         cpus=getattr(args, "cpus", None),
         lazy=getattr(args, "lazy", None),
         backend=("icechunk" if getattr(args, "ic", False) else None),

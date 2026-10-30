@@ -16,6 +16,7 @@ from annizarr._core._zarr import (
     get_array,
     get_group,
     has_element,
+    matrix_shape,
     shape_attr,
     str_attr,
     str_list_attr,
@@ -28,9 +29,12 @@ from annizarr._storage import (
     store_path,
     verify_store_shape,
 )
+from annizarr._writers._copy import copy_matrix
 from annizarr._writers._encoding import nullable_series, write_frame_column, write_settings
+from annizarr._writers._matrix import MatrixLayout, write_matrix
+from annizarr._writers._sparse import _local_tmp_dir
 from annizarr.errors import AnzError, ConversionError
-from annizarr.ops._expr import target_sum_attr
+from annizarr.ops._layer import SOURCE_ATTR
 from annizarr.ops._result import AppendPlan, OpResult
 
 if TYPE_CHECKING:
@@ -67,15 +71,16 @@ def plan_append(store: StoreLike, *, cells: StoreLike) -> AppendPlan:
     -------
     AppendPlan
         What appending would do: new-cell count, derived elements that would be
-        dropped, layers eligible for in-place extension, and other notes.
+        dropped, layers both stores carry (appended), and other notes.
 
     Raises
     ------
     ConversionError
         ``store``/``cells`` is not a CSR AnnData zarr store, ``var`` names/order
         mismatch, a shared obs column's encoding or dtype mismatch, a plain string obs
-        column the cells lack, an X dtype mismatch, or every appended cell's obs name is
-        already present in the store (already appended?).
+        column the cells lack, an X dtype mismatch, a shared layer whose cells dtype cannot be
+        cast to the store's without loss, or every appended cell's obs name is already present
+        in the store (already appended?).
     """
     root = open_input_group(store)
     src = open_input_group(cells)
@@ -106,21 +111,19 @@ def plan_append(store: StoreLike, *, cells: StoreLike) -> AppendPlan:
         raise ConversionError(f"X dtype mismatch: {data_t.dtype} vs {data_s.dtype}.")
 
     n_t, _ = shape_attr(x_t)
-    n_s, _ = shape_attr(x_s)
-    indptr_t = np.asarray(get_array(x_t, "indptr")[:], dtype=np.int64)
+    n_s, n_vars = shape_attr(x_s)
 
-    ext_layers: list[str] = []
-    bad_layers: list[str] = []
-    if layer_keys:
-        ext_layers, bad_layers = _extendable_layers(get_group(root, "layers"), layer_keys, indptr_t)
-    drop_layers = [k for k in layer_keys if k not in ext_layers]
+    cells_layer_keys = list(get_group(src, "layers")) if "layers" in src else []
+    append_layers = [k for k in layer_keys if k in cells_layer_keys]
+    drop_layers = [k for k in layer_keys if k not in cells_layer_keys]
+    for k in append_layers:
+        _check_layer(k, root[f"layers/{k}"], src[f"layers/{k}"], (n_s, n_vars))
 
     notes: list[str] = list(obs_notes)
-    if bad_layers:
-        notes.append(f"layers {bad_layers}: sparsity differs from X, cannot extend.")
     extras = []
-    if "layers" in src and list(get_group(src, "layers")):
-        extras.append(f"layers {list(get_group(src, 'layers'))}")
+    cells_only = [k for k in cells_layer_keys if k not in layer_keys]
+    if cells_only:
+        extras.append(f"layers {cells_only}")
     if has_element(src, "raw") and len(list(get_group(src, "raw"))) > 0:
         extras.append("raw")
     if "obsm" in src and list(get_group(src, "obsm")):
@@ -140,7 +143,7 @@ def plan_append(store: StoreLike, *, cells: StoreLike) -> AppendPlan:
         drop_obsm=tuple(obsm_keys),
         drop_obsp=tuple(obsp_keys),
         drop_layers=tuple(drop_layers),
-        extendable_layers=tuple(ext_layers),
+        append_layers=tuple(append_layers),
         n_duplicate_names=n_duplicate_names,
         notes=tuple(notes),
         obs_extra=obs_extra,
@@ -154,7 +157,6 @@ def append(
     *,
     cells: StoreLike,
     drop_derived: bool = False,
-    extend_layers: bool = False,
     include_new_obs: bool = False,
     cfg: AppConfig | None = None,
     branch: str | None = None,
@@ -163,15 +165,16 @@ def append(
 ) -> OpResult:
     """Append the cells of another zarr store onto this one, in place.
 
-    Extends X and obs only. Obs columns are matched by name: one the cells lack gets missing
-    values on the appended rows, one only the cells carry is left out unless ``include_new_obs``,
-    and a plain int or bool store column is rewritten as nullable when it must hold a missing
-    value. Derived obs-aligned elements on the store (obsm embeddings,
-    obsp graphs, layers) are invalidated by new cells; :func:`plan_append` is called first,
-    and if it would drop anything this raises unless ``drop_derived=True`` (re-derive
-    layers afterwards with :func:`~annizarr.ops._expr.add_expr`). With ``extend_layers``,
-    CSR layers created by add-expr (recorded target_sum, X's exact sparsity) are extended
-    in place instead — the lognorm transform runs on the appended cells only.
+    Extends X, obs, and every layer both stores carry. Obs columns are matched by name: one the
+    cells lack gets missing values on the appended rows, one only the cells carry is left out
+    unless ``include_new_obs``, and a plain int or bool store column is rewritten as nullable when
+    it must hold a missing value. A shared layer is appended in the store layer's encoding, its
+    cells values cast to the store's dtype when that loses nothing (CSR and dense layers grow in
+    place; a CSC layer is rewritten, since every column grows in the middle). Derived obs-aligned
+    elements the cells cannot extend (obsm embeddings, obsp graphs, layers only the store
+    carries) are invalidated by new cells; :func:`plan_append` is called first, and if it would
+    drop anything this raises unless ``drop_derived=True`` (re-create a dropped layer afterwards
+    with :func:`~annizarr.ops._layer.add_layer`).
 
     Parameters
     ----------
@@ -181,8 +184,6 @@ def append(
         Another AnnData zarr (or Icechunk) store whose cells are appended.
     drop_derived
         Consent to dropping derived obs-aligned elements the plan says would drop.
-    extend_layers
-        Extend eligible add-expr CSR layers in place instead of dropping them.
     include_new_obs
         Add obs columns only the cells carry, with missing values on the existing cells.
     cfg
@@ -211,17 +212,12 @@ def append(
         cfg = AppConfig()
 
     plan = plan_append(store, cells=cells)
-    drop_layers = list(plan.drop_layers)
-    ext_layers = list(plan.extendable_layers) if extend_layers else []
-    if not extend_layers:
-        drop_layers += list(plan.extendable_layers)
-
-    drops = plan.drops(extend_layers=extend_layers)
+    drops = plan.drops()
     if drops and not drop_derived:
         raise ConversionError(
             "append will drop derived elements (invalidated by appended cells): "
             + ", ".join(drops)
-            + ". Pass drop_derived=True to proceed; re-derive layers with add-expr afterwards."
+            + ". Pass drop_derived=True to proceed; re-create a dropped layer with add-layer afterwards."
         )
 
     for note in plan.notes:
@@ -239,32 +235,25 @@ def append(
         commit=commit,
     )
 
-    x_t, x_s = get_group(root, "X"), get_group(src, "X")
+    x_t = get_group(root, "X")
     n_t, n_vars = shape_attr(x_t)
-    n_s, _ = shape_attr(x_s)
-    indptr_t = np.asarray(get_array(x_t, "indptr")[:], dtype=np.int64)
-    indptr_s = np.asarray(get_array(x_s, "indptr")[:], dtype=np.int64)
+    n_s, _ = shape_attr(get_group(src, "X"))
+    nnz = sum(int(np.asarray(get_array(x, "indptr")[-1:])[0]) for x in (x_t, get_group(src, "X")))
 
-    obsm_keys, obsp_keys = list(plan.drop_obsm), list(plan.drop_obsp)
     try:
-        for group_key, keys in (("obsm", obsm_keys), ("obsp", obsp_keys), ("layers", drop_layers)):
-            for k in keys:
-                del get_group(root, group_key)[k]
-        drop_groups = (("obsm", obsm_keys), ("obsp", obsp_keys), ("layers", drop_layers))
-        dropped = [f"{g} {list(k)}" for g, k in drop_groups if k]
-        if dropped:
-            hint = "; re-derive layers with add-expr" if drop_layers else ""
-            logger.warning("dropped " + ", ".join(dropped) + f" (invalidated by appended cells{hint}).")
-        _append_arrays(root, src, x_t, x_s, indptr_t, indptr_s, n_t, n_s, n_vars, cfg, plan, include_new_obs)
+        hints = _drop_derived(root, plan)
+        if hints:
+            logger.warning("dropped " + ", ".join(hints) + " (invalidated by appended cells).")
+        with stage(f"Appending X ({n_s} cells)"):
+            _append_matrix(root, "X", src["X"], n_t, cfg)
+        for k in plan.append_layers:
+            with stage(f"Appending layers/{k} ({n_s} cells)"):
+                _append_matrix(root, f"layers/{k}", src[f"layers/{k}"], n_t, cfg)
+        with stage(f"Appending obs ({n_s} cells)"), write_settings(cfg.chunks.auto_shard):
+            _append_obs(root["obs"], src["obs"], n_t, n_t + n_s, plan, include_new_obs)
         if plan.obs_extra:
             done = "added (missing on the existing cells)" if include_new_obs else "not appended"
             logger.warning(f"obs columns {list(plan.obs_extra)} {done}.")
-        if ext_layers:
-            _extend_lognorm_layers(root, x_s, ext_layers, indptr_t, indptr_s, n_t + n_s, n_vars, cfg)
-            logger.warning(
-                f"extended layers {ext_layers} in place (lognorm applied to the appended "
-                "cells at each layer's recorded target_sum)."
-            )
     except AnzError:
         raise
     except Exception as e:
@@ -279,10 +268,120 @@ def append(
             "(partial overlap with existing cells)."
         )
     logger.warning("appended cells break any sorted-store contiguity; re-run `annizarr sort` if the store was sorted.")
-    nnz = int(indptr_t[-1]) + int(indptr_s[-1])
-    verify_store_shape(root, n_obs=n_t + n_s, n_vars=n_vars, nnz=nnz, layers=ext_layers)
+    verify_store_shape(root, n_obs=n_t + n_s, n_vars=n_vars, nnz=nnz, layers=plan.append_layers)
     snapshot_id = finalize()
     return OpResult(path=store_path(store), n_obs=n_t + n_s, n_vars=n_vars, snapshot_id=snapshot_id)
+
+
+def _check_layer(key: str, node_t: Any, node_s: Any, cells_shape: tuple[int, int]) -> None:
+    # a shared layer appends when the cells' values fit the store's dtype exactly; anything else refuses up front
+    if matrix_shape(node_s) != cells_shape:
+        raise ConversionError(f"layers/{key} in the cells is {matrix_shape(node_s)}, not cells x var {cells_shape}.")
+    MatrixLayout.of(node_t)  # refuses a store element that is not a matrix
+    dtype_t, dtype_s = _matrix_dtype(node_t), _matrix_dtype(node_s)
+    if not _lossless(dtype_s, dtype_t):
+        raise ConversionError(
+            f"layers/{key}: the cells hold {dtype_s}, which does not fit the store's {dtype_t} without loss; "
+            "cast one side before appending."
+        )
+
+
+def _lossless(src: np.dtype[Any], dst: np.dtype[Any]) -> bool:
+    # numpy's "safe" casting allows int64 -> float64, which rounds above 2**53; every value must survive
+    if not np.can_cast(src, dst, casting="safe"):
+        return False
+    if src.kind in "iu" and dst.kind == "f":
+        return bool(np.iinfo(src).bits - (src.kind == "i") <= np.finfo(dst).nmant + 1)
+    return True
+
+
+def _matrix_dtype(node: Any) -> np.dtype[Any]:
+    return np.dtype(node.dtype if isinstance(node, zarr.Array) else get_array(node, "data").dtype)
+
+
+def _drop_derived(root: zarr.Group, plan: AppendPlan) -> list[str]:
+    # deletes what the plan drops; returns one line per element group, with add-layer hints for copied layers
+    lines: list[str] = []
+    for group_key, keys in (("obsm", plan.drop_obsm), ("obsp", plan.drop_obsp), ("layers", plan.drop_layers)):
+        if not keys:
+            continue
+        group = get_group(root, group_key)
+        sources = {k: group[k].attrs.get(SOURCE_ATTR) for k in keys} if group_key == "layers" else {}
+        for k in keys:
+            del group[k]
+        hints = [f"add-layer --layer {k} --matrix {m}" for k, m in sources.items() if isinstance(m, str)]
+        lines.append(f"{group_key} {list(keys)}" + (f" (re-create with {'; '.join(hints)})" if hints else ""))
+    return lines
+
+
+def _append_matrix(root: zarr.Group, key: str, cells_node: Any, n_t: int, cfg: AppConfig) -> None:
+    # the cells' element, read as rows in any encoding and cast to the store's dtype, appended in the store's encoding
+    from annizarr._sources._readers import CastReader, as_reader
+
+    node = root[key]
+    tmp_dir = _local_tmp_dir(root)
+    reader: Reader = as_reader(cells_node, cfg=cfg, tmp_dir=tmp_dir)
+    try:
+        dtype = _matrix_dtype(node)
+        if reader.dtype != dtype:
+            reader = CastReader(reader, dtype)
+        layout = MatrixLayout.of(node).layout
+        if layout == "csr":
+            _append_csr(as_group(node), reader, n_t, cfg.chunks.cpus)
+        elif layout == "dense":
+            _append_dense(as_array(node), reader, n_t, cfg.chunks.cpus)
+        else:
+            _rewrite_appended(root, key, reader, tmp_dir, cfg)
+    finally:
+        reader.close()
+
+
+def _append_csr(group: zarr.Group, reader: Reader, n_t: int, cpus: int) -> None:
+    indptr_t = np.asarray(get_array(group, "indptr")[:], dtype=np.int64)
+    nnz_t, nnz_s = int(indptr_t[-1]), reader.nnz
+    _extend_flat(get_array(group, "data"), _FlatSource(reader.flat_data), nnz_t, nnz_s, cpus)
+    _extend_flat(get_array(group, "indices"), _FlatSource(reader.flat_indices), nnz_t, nnz_s, cpus)
+    _rewrite_indptr(group, indptr_t, reader.indptr, n_t + reader.shape[0])
+    group.attrs["shape"] = [n_t + reader.shape[0], reader.shape[1]]
+
+
+def _append_dense(arr: zarr.Array[Any], reader: Reader, n_t: int, cpus: int) -> None:
+    n_s, n_vars = reader.shape
+    arr.resize((n_t + n_s, n_vars))
+    row_bytes = _layout.copy_bytes_per_item(arr.dtype.itemsize) * n_vars
+    cuts = _append_cuts(n_t, n_s, unit=_layout.write_grid(arr)[0], bytes_per_item=row_bytes, cpus=cpus)
+    run_parallel(_write_rows, [(reader, arr, r0, r1, n_t) for r0, r1 in cuts], cpus)
+
+
+def _rewrite_appended(root: zarr.Group, key: str, cells: Reader, tmp_dir: str | None, cfg: AppConfig) -> None:
+    # a CSC element cannot grow in place (every column gains entries mid-array): the store's rows and the
+    # cells' rows are written whole to a temp store in the element's own layout, then copied into place
+    import shutil
+    import tempfile
+
+    from annizarr._sources._readers import ConcatReader, as_reader
+
+    node = root[key]
+    layer_cfg = MatrixLayout.of(node).cfg(cfg)
+    kept_attrs = {k: v for k, v in node.attrs.items() if k not in ("encoding-type", "encoding-version", "shape")}
+    # the element keeps its own codecs; the temp store is only scaffolding
+    codecs = {k: get_array(as_group(node), k).compressors for k in ("data", "indices")}
+    logger.warning(f"{key} is {layer_cfg.io.layout}: rewriting it whole to append (a full pass over the element).")
+    scratch = tempfile.mkdtemp(prefix="annizarr_rewrite_", dir=tmp_dir)
+    try:
+        tmp_root = zarr.open_group(scratch, mode="w")
+        stored = as_reader(node, cfg=cfg, tmp_dir=scratch)
+        try:
+            write_matrix(tmp_root, "m", ConcatReader([stored, cells]), layer_cfg)
+        finally:
+            stored.close()
+        parent_key, _, name = key.rpartition("/")
+        parent = get_group(root, parent_key) if parent_key else root
+        del parent[name]
+        copy_matrix(tmp_root["m"], parent, name, cfg, rechunk=False, codecs=codecs)
+        parent[name].attrs.update(kept_attrs)
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
 
 
 def _check_obs_schema(
@@ -465,47 +564,23 @@ def _count_duplicate_names(obs_t: zarr.Group, obs_s: zarr.Group, n_t: int) -> in
     return int((in_target | repeats_earlier).sum())
 
 
-def _append_arrays(
-    root: Any,
-    src: Any,
-    x_t: Any,
-    x_s: Any,
-    indptr_t: Any,
-    indptr_s: Any,
-    n_t: int,
-    n_s: int,
-    n_vars: int,
-    cfg: AppConfig,
-    plan: AppendPlan,
-    include_new_obs: bool,
-) -> None:
-    nnz_t, nnz_s = int(indptr_t[-1]), int(indptr_s[-1])
-    n_new = n_t + n_s
-
-    with stage(f"Appending X ({n_s} cells, nnz={nnz_s})"):
-        for name in ("data", "indices"):
-            _extend_flat(x_t[name], x_s[name], nnz_t, nnz_s, cfg.chunks.cpus)
-        _rewrite_indptr(x_t, indptr_t, indptr_s, n_new)
-        x_t.attrs["shape"] = [n_new, n_vars]
-
-    with stage(f"Appending obs ({n_s} cells)"), write_settings(cfg.chunks.auto_shard):
-        _append_obs(root["obs"], src["obs"], n_t, n_new, plan, include_new_obs)
-
-
 def _extend_flat(dst_a: Any, src_a: Any, off: int, n_src: int, cpus: int) -> None:
-    # after the seam, cuts land on dst's write-grid multiples (no read-modify-write).
     dst_a.resize((off + n_src,))
-    grid0 = _layout.write_grid(dst_a)[0]
-    seam = min((-off) % grid0, n_src)  # the part that lands in dst's existing partial chunk, maybe all of it
-    cuts: list[tuple[int, int]] = [(0, seam)] if seam else []
     bytes_per_item = _layout.copy_bytes_per_item(dst_a.dtype.itemsize)
+    cuts = _append_cuts(off, n_src, unit=_layout.write_grid(dst_a)[0], bytes_per_item=bytes_per_item, cpus=cpus)
+    run_parallel(_copy_shifted, [(src_a, dst_a, s0, s1, off) for s0, s1 in cuts], cpus)
+
+
+def _append_cuts(off: int, n_src: int, *, unit: int, bytes_per_item: int, cpus: int) -> list[tuple[int, int]]:
+    # the part landing in the existing partial write unit first, then bands on the write grid (no read-modify-write)
+    seam = min((-off) % unit, n_src)
+    cuts: list[tuple[int, int]] = [(0, seam)] if seam else []
     cuts += [
         (seam + s0, seam + s1)
-        for s0, s1 in _layout.plan_bands(n_src - seam, unit=grid0, bytes_per_item=bytes_per_item, cpus=cpus)
+        for s0, s1 in _layout.plan_bands(n_src - seam, unit=unit, bytes_per_item=bytes_per_item, cpus=cpus)
     ]
-    assert cuts and cuts[0][0] == 0 and cuts[-1][1] == n_src, "the cuts must cover the whole append"
-    jobs = [(src_a, dst_a, s0, s1, off) for s0, s1 in cuts]
-    run_parallel(_copy_shifted, jobs, cpus)
+    assert not n_src or (cuts[0][0] == 0 and cuts[-1][1] == n_src), "the cuts must cover the whole append"
+    return cuts
 
 
 def _rewrite_indptr(parent: Any, indptr_t: Any, indptr_s: Any, n_new: int) -> None:
@@ -518,56 +593,15 @@ def _rewrite_indptr(parent: Any, indptr_t: Any, indptr_s: Any, n_new: int) -> No
     ip[:] = np.concatenate([indptr_t, indptr_s[1:] + nnz_t]).astype(indptr_dtype)
 
 
-def _extendable_layers(layers: Any, keys: list[str], indptr_t: Any) -> tuple[list[str], list[str]]:
-    # a sparsity mismatch goes to `bad` instead — extending it in place would corrupt it.
-    ext, bad = [], []
-    for k in keys:
-        node = layers[k]
-        if isinstance(node, zarr.Array) or node.attrs.get("encoding-type") != "csr_matrix":
-            continue
-        if target_sum_attr(node.attrs) is None:
-            continue
-        lp = np.asarray(node["indptr"][:], dtype=np.int64)
-        if len(lp) != len(indptr_t) or not (lp == indptr_t).all():
-            bad.append(k)
-            continue
-        ext.append(k)
-    return ext, bad
+class _FlatSource:
+    # a reader's flat values or indices as a sliceable source for _extend_flat
+    __slots__ = ("_read",)
 
-
-def _extend_lognorm_layers(
-    root: Any, x_s: Any, keys: list[str], indptr_t: Any, indptr_s: Any, n_new: int, n_vars: int, cfg: AppConfig
-) -> None:
-    from annizarr._sources._readers import ScaledReader, as_reader
-    from annizarr.ops._expr import lognorm_factors
-
-    nnz_t, nnz_s = int(indptr_t[-1]), int(indptr_s[-1])
-    n_s = len(indptr_s) - 1
-    x_reader = as_reader(x_s, cfg=cfg)
-    try:
-        for k in keys:
-            g = root["layers"][k]
-            target_sum = target_sum_attr(g.attrs)  # eligibility already checked this is present
-            assert target_sum is not None
-            scaled = ScaledReader(x_reader, lognorm_factors(x_reader, target_sum))
-            with stage(f"Extending layers/{k} ({n_s} cells, nnz={nnz_s})"):
-                _extend_flat(g["indices"], x_s["indices"], nnz_t, nnz_s, cfg.chunks.cpus)
-                _extend_flat(g["data"], _FlatValues(scaled), nnz_t, nnz_s, cfg.chunks.cpus)
-                _rewrite_indptr(g, indptr_t, indptr_s, n_new)
-                g.attrs["shape"] = [n_new, n_vars]
-    finally:
-        x_reader.close()
-
-
-class _FlatValues:
-    # a reader's flat values as a sliceable source for _extend_flat
-    __slots__ = ("_reader",)
-
-    def __init__(self, reader: Reader) -> None:
-        self._reader = reader
+    def __init__(self, read: Any) -> None:
+        self._read = read
 
     def __getitem__(self, item: slice) -> Any:
-        return self._reader.flat_data(item.start or 0, item.stop)
+        return self._read(item.start or 0, item.stop)
 
 
 def _append_obs(obs_t: Any, obs_s: Any, n_t: int, n_new: int, plan: AppendPlan, include_new_obs: bool) -> None:
@@ -681,3 +715,7 @@ def _extend_1d(dst: Any, vals: Any, n_t: int, n_new: int) -> None:
 
 def _copy_shifted(src: Any, dst: Any, s0: int, s1: int, off: int) -> None:
     dst[off + s0 : off + s1] = src[s0:s1]
+
+
+def _write_rows(reader: Reader, dst: Any, r0: int, r1: int, off: int) -> None:
+    dst[off + r0 : off + r1, :] = reader.dense_block(r0, r1, 0, reader.shape[1])

@@ -12,7 +12,7 @@ import os
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-COMMANDS = ("convert", "rechunk", "sort", "append", "add-expr")
+COMMANDS = ("convert", "rechunk", "sort", "append", "add-layer")
 HEADER = """\
 # CLI reference
 

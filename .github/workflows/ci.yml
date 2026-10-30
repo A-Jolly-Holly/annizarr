@@ -28,6 +28,12 @@ jobs:
       - run: ruff format --check src tests docs
       - run: mypy --strict src/annizarr
       - run: pytest  # coverage gate is in pyproject.toml
+      - name: worker count under a real affinity mask and container CPU quota
+        # the unit tests fake the cgroup files; this reads real ones (quota 1.5 rounds up to 2)
+        run: |
+          taskset -c 0 python -c "from annizarr._core._system import usable_cpus as u; assert u() == 1, u()"
+          docker run --rm --cpus=1.5 -v "$PWD/src:/src:ro" -e PYTHONPATH=/src python:3.14-slim \
+            python -c "from annizarr._core._system import usable_cpus as u; assert u() == 2, u()"
       - if: github.event_name != 'pull_request'
         run: pytest -m slow --no-cov  # a few minutes, out of core testing
 
