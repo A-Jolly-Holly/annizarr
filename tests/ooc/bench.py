@@ -49,9 +49,9 @@ def _commands(d: Path, n: str) -> list[tuple[str, str, list[str], list[Path]]]:
             [*q, "rechunk", str(csr), "-o", str(rechunk), "--row-chunk", "10000", "--cpus", n],
             [rechunk],
         ),
-        ("add-expr", "csr", [*q, "add-expr", str(csr), "--layout", "csr", "--cpus", n], []),
-        ("add-expr", "csc", [*q, "add-expr", str(csr), "--layout", "csc", "--overwrite", "--cpus", n], []),
-        ("add-expr", "dense", [*q, "add-expr", str(csr), "--layout", "dense", "--overwrite", "--cpus", n], []),
+        ("add-layer", "csr", [*q, "add-layer", str(csr), "--layer", "l_csr", "--layout", "csr", "--cpus", n], []),
+        ("add-layer", "csc", [*q, "add-layer", str(csr), "--layer", "l_csc", "--layout", "csc", "--cpus", n], []),
+        ("add-layer", "dense", [*q, "add-layer", str(csr), "--layer", "l_dense", "--layout", "dense", "--cpus", n], []),
         ("convert", "extra", [*q, "convert", str(extra), "-o", str(extra_store), "--cpus", n], []),
         (
             "append",

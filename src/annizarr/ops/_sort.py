@@ -1,22 +1,20 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from annizarr._core._config import AppConfig, resolve_backend_cfg
 from annizarr._core._sorting import stream_sorted_store
-from annizarr._core._zarr import get_group, has_element
+from annizarr._core._zarr import get_group, matrix_keys
 from annizarr._storage import check_output_target, is_remote, op_metadata, open_input_group, store_name, store_path
+from annizarr._writers._matrix import MatrixLayout
 from annizarr.errors import ConversionError
 from annizarr.ops._result import OpResult
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    import zarr
-
-    from annizarr.typing import Layout, StoreLike
+    from annizarr.typing import StoreLike
 
 logger = logging.getLogger(__name__)
 
@@ -55,14 +53,15 @@ def sort(
     Raises
     ------
     ConversionError
-        ``by`` is empty, ``output`` is a remote (s3://, gs://) URI, ``store`` has no CSR X,
-        or ``store`` carries layers other than a lone ``gexp`` (re-derived on the
-        sorted output), non-empty ``raw``, or non-empty ``obsp`` (none of those are
-        reordered).
+        ``by`` is empty, ``output`` is a remote (s3://, gs://) URI, or ``store`` has no CSR X.
+
+    Notes
+    -----
+    Every cells-aligned element moves with the rows: obs, obsm, every layer and ``raw/X`` (each
+    in its own encoding and chunking), and every ``obsp`` graph on both axes, so a neighbour
+    graph still links the same cells.
     """
     from anndata.io import read_elem, sparse_dataset
-
-    from annizarr.ops._expr import introspect_gexp, write_expr_layer
 
     if cfg is None:
         cfg = AppConfig()
@@ -81,39 +80,22 @@ def sort(
         raise ConversionError(f"no X in {store_path(store)} — not an AnnData zarr store?")
     if src["X"].attrs.get("encoding-type") != "csr_matrix":
         raise ConversionError(f"sort requires CSR X; got encoding {src['X'].attrs.get('encoding-type')!r}.")
-    # a lone gexp layer is re-derived on the sorted output; anything else is refused
-    gexp_params = None
-    layer_keys = list(get_group(src, "layers")) if "layers" in src else []
-    if layer_keys == ["gexp"]:
-        gexp_params = introspect_gexp(get_group(src, "layers")["gexp"])
-    elif layer_keys:
-        raise ConversionError(f"sort does not reorder layers {layer_keys}; only a gexp layer is re-derived.")
-    for key in ("raw", "obsp"):
-        if has_element(src, key) and len(list(get_group(src, key))) > 0:
-            raise ConversionError(f"sort does not reorder {key} yet; drop it or sort at convert time.")
 
     def _read(key: str) -> Any:
         return read_elem(src[key]) if key in src else {}
 
+    # every other matrix keeps its own layout and chunking; its codec follows cfg, like every array sort writes
+    keys = [k for k in matrix_keys(src) if k != "X"]
+    if "obsp" in src:
+        keys += [f"obsp/{k}" for k in get_group(src, "obsp")]
+    matrices = {k: (src[k], MatrixLayout.of(src[k]).cfg(cfg)) for k in keys}
+    raw: tuple[Any, dict[str, Any]] | None = None
+    if "raw/X" in matrices:
+        raw_group = get_group(src, "raw")
+        raw = (read_elem(raw_group["var"]), _read("raw/varm"))
+
     x = sparse_dataset(src["X"])
     n_obs, n_vars = x.shape
-    commit_message = message or f"annizarr sort by {','.join(by)} → {store_name(output)}"
-
-    after_write = None
-    if gexp_params is not None:
-        layout = gexp_params.layout
-        target_sum = gexp_params.target_sum
-        if target_sum is None:
-            logger.warning("layers/gexp has no recorded target_sum; re-deriving at 1e4.")
-            target_sum = 1e4
-        layer_cfg = replace(cfg, chunks=gexp_params.chunks(cfg.chunks))
-
-        def after_write(root: zarr.Group, layout: Layout = layout, target_sum: float = target_sum) -> None:
-            # re-derives gexp before stream_sorted_store's finalize(), so it lands in the
-            # same icechunk commit rather than a separate add_expr call afterwards.
-            write_expr_layer(root, layer_cfg, layout=layout, target_sum=target_sum)
-            logger.warning(f"layers/gexp re-derived ({layout}) on the sorted store.")
-
     snapshot_id = stream_sorted_store(
         x,
         read_elem(src["obs"]),
@@ -125,9 +107,10 @@ def sort(
         output,
         cfg,
         sort_by=by,
-        commit_message=commit_message,
+        matrices=matrices,
+        raw=raw,
+        commit_message=message or f"annizarr sort by {','.join(by)} → {store_name(output)}",
         commit_metadata=op_metadata("sort", source=store_name(store)),
         branch=branch,
-        after_write=after_write,
     )
     return OpResult(path=store_path(output), n_obs=n_obs, n_vars=n_vars, snapshot_id=snapshot_id)

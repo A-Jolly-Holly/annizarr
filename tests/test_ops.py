@@ -1,8 +1,9 @@
-"""The edit ops on plain zarr: add-expr, rechunk, sort, append, and their lifecycle together."""
+"""The edit ops on plain zarr: add-layer, rechunk, sort, append, and their lifecycle together."""
 
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import anndata as ad
 import numpy as np
@@ -15,9 +16,8 @@ from anndata.io import read_elem, sparse_dataset, write_elem
 from annizarr._storage import open_input_group
 from annizarr.config import AppConfig, ChunkConfig, GroupingConfig
 from annizarr.errors import ConversionError, StorageError
-from annizarr.ops import add_expr, append, convert_h5ad, plan_append, rechunk, sort
-from annizarr.ops._expr import introspect_gexp
-from helpers import assert_anndata_readable, cfg, chunks, expected_lognorm, make_labelled_h5ad, messages, read_x
+from annizarr.ops import add_layer, append, convert_h5ad, plan_append, rechunk, sort
+from helpers import assert_anndata_readable, cfg, chunks, make_labelled_h5ad, messages, read_x
 
 
 def _layer_cfg(nnz_chunk: int) -> AppConfig:
@@ -44,66 +44,96 @@ def _store(tmp_path: Path, adata: ad.AnnData, name: str = "store.zarr", config: 
     return out
 
 
-def _layer(store: Path, name: str = "gexp") -> np.ndarray:
-    layer = ad.read_zarr(str(store)).layers[name]
-    return np.asarray(layer) if isinstance(layer, np.ndarray) else layer.toarray()
+def _dense(matrix: Any) -> np.ndarray:
+    return matrix.toarray() if sp.issparse(matrix) else np.asarray(matrix)
+
+
+def _layer(store: Path, name: str) -> np.ndarray:
+    return _dense(ad.read_zarr(str(store)).layers[name])
 
 
 @pytest.mark.parametrize("layout", ["csr", "csc", "dense"])
-def test_add_expr_layouts(tmp_path: Path, layout: str) -> None:
+def test_add_layer_copies_x_value_for_value(tmp_path: Path, layout: str) -> None:
     adata = _adata()
     out = _store(tmp_path, adata)
-    add_expr(str(out), layout=layout, cfg=_layer_cfg(80))
+    add_layer(str(out), layer="copy", layout=layout, cfg=_layer_cfg(80))
     assert_anndata_readable(out)
-    root = zarr.open_group(str(out), mode="r")
+    node = zarr.open_group(str(out), mode="r")["layers/copy"]
     if layout == "dense":
-        assert root["layers/gexp"].chunks == (adata.n_obs, adata.n_vars)  # row_chunk x col_chunk tiles
+        assert node.chunks == (adata.n_obs, adata.n_vars)  # row_chunk x col_chunk tiles, clipped to the shape
     else:
-        assert root["layers/gexp"].attrs["encoding-type"] == {"csr": "csr_matrix", "csc": "csc_matrix"}[layout]
-    np.testing.assert_allclose(_layer(out), expected_lognorm(adata.X), rtol=1e-5)
-    np.testing.assert_allclose(read_x(out), adata.X.toarray())
+        assert node.attrs["encoding-type"] == {"csr": "csr_matrix", "csc": "csc_matrix"}[layout]
+    assert node.attrs["annizarr-source"] == "X"
+    np.testing.assert_array_equal(_layer(out, "copy"), adata.X.toarray())
+    assert ad.read_zarr(str(out)).layers["copy"].dtype == adata.X.dtype
     with pytest.raises(ConversionError, match="already exists"):
-        add_expr(str(out), layout=layout, cfg=_layer_cfg(80))
-    add_expr(str(out), layout="csr", layer="gexp", overwrite=True, target_sum=1e6, cfg=_layer_cfg(80))
-    np.testing.assert_allclose(_layer(out), expected_lognorm(adata.X, 1e6), rtol=1e-5)
+        add_layer(str(out), layer="copy", layout=layout, cfg=_layer_cfg(80))
+    add_layer(str(out), layer="copy", layout="csr", overwrite=True, cfg=_layer_cfg(80))
+    np.testing.assert_array_equal(_layer(out, "copy"), adata.X.toarray())
 
 
-def test_add_expr_handles_empty_rows_and_genes_and_many_bands(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_add_layer_sources_empty_rows_and_guards(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     x = np.zeros((10, 5), dtype=np.float32)
     x[1:9, [0, 1, 3, 4]] = np.arange(1, 33, dtype=np.float32).reshape(8, 4)  # empty first and last rows, empty gene 2
     empty = ad.AnnData(
         X=sp.csr_matrix(x),
         obs=pd.DataFrame(index=[f"c{i}" for i in range(10)]),
         var=pd.DataFrame(index=[f"g{i}" for i in range(5)]),
+        layers={"counts": sp.csr_matrix(x * 2)},
     )
-    for layout in ("csr", "csc", "dense"):
-        out = _store(tmp_path, empty, f"empty-{layout}.zarr")
-        add_expr(str(out), layout=layout, cfg=_layer_cfg(16))
-        vals = _layer(out)
-        np.testing.assert_allclose(vals, expected_lognorm(x), rtol=1e-5)
-        assert not vals[0].any() and not vals[-1].any() and not vals[:, 2].any()
+    empty.raw = empty.copy()
+    out = _store(tmp_path, empty, "empty.zarr")
+    for layer, matrix, layout in (
+        ("from_x", "X", "csc"),
+        ("from_layer", "layers/counts", "dense"),
+        ("from_raw", "raw/X", "csc"),
+    ):
+        add_layer(str(out), layer=layer, matrix=matrix, layout=layout, cfg=_layer_cfg(16))
+        expected = x * 2 if matrix == "layers/counts" else x
+        np.testing.assert_array_equal(_layer(out, layer), expected)
+        assert zarr.open_group(str(out), mode="r")[f"layers/{layer}"].attrs["annizarr-source"] == matrix
+
+    with pytest.raises(ConversionError, match="onto itself"):
+        add_layer(str(out), layer="counts", matrix="layers/counts", overwrite=True, cfg=cfg())
+    with pytest.raises(ConversionError, match="not a matrix element"):
+        add_layer(str(out), layer="new", matrix="obsm/X_pca", cfg=cfg())
+    with pytest.raises(ConversionError, match="layout"):
+        add_layer(str(out), layer="new", layout="coo", cfg=cfg())  # type: ignore[arg-type]
+    narrow = empty.copy()
+    narrow.raw = empty[:, :3].copy()
+    with pytest.raises(ConversionError, match="not cells x var"):
+        add_layer(str(_store(tmp_path, narrow, "narrow.zarr")), layer="new", matrix="raw/X", cfg=cfg())
 
     monkeypatch.setattr("annizarr._core._layout.BATCH_BYTES", 4000)  # dozens of source and output bands
     adata = _adata(n=300, v=12, seed=4)
     for layout in ("csc", "dense"):
         out = _store(tmp_path, adata, f"bands-{layout}.zarr")
-        add_expr(str(out), layout=layout, cfg=AppConfig(chunks=ChunkConfig(nnz_chunk=80, cpus=1)))
-        np.testing.assert_allclose(_layer(out), expected_lognorm(adata.X), rtol=1e-5)
+        add_layer(str(out), layer="copy", layout=layout, cfg=AppConfig(chunks=ChunkConfig(nnz_chunk=80, cpus=1)))
+        np.testing.assert_array_equal(_layer(out, "copy"), adata.X.toarray())
 
 
 def test_rechunk_targets_one_matrix_and_copies_the_rest(tmp_path: Path) -> None:
     adata = _adata()
     out = _store(tmp_path, adata)
-    add_expr(str(out), layout="csc", cfg=_layer_cfg(32))
+    add_layer(str(out), layer="csc", cfg=_layer_cfg(32))
     rechunk(str(out), output=str(tmp_path / "sparse.zarr"), cfg=AppConfig(chunks=ChunkConfig(nnz_chunk=16, cpus=2)))
     assert_anndata_readable(tmp_path / "sparse.zarr")
     root = zarr.open_group(str(tmp_path / "sparse.zarr"), mode="r")
-    assert root["X/data"].chunks == (16,) and root["layers/gexp/data"].chunks == (32,)  # the layer is copied as is
+    assert root["X/data"].chunks == (16,) and root["layers/csc/data"].chunks == (32,)  # the layer is copied as is
     got = ad.read_zarr(str(tmp_path / "sparse.zarr"))
     np.testing.assert_allclose(got.X.toarray(), adata.X.toarray())
     assert list(got.obs["cell_type"]) == list(adata.obs["cell_type"])
     np.testing.assert_allclose(got.obsm["X_umap"], adata.obsm["X_umap"])
-    np.testing.assert_allclose(got.layers["gexp"].toarray(), expected_lognorm(adata.X), rtol=1e-5)
+    np.testing.assert_array_equal(got.layers["csc"].toarray(), adata.X.toarray())
+
+    # the rechunked matrix keeps its source's compression unless clevel says otherwise; copies always keep theirs
+    rechunk(
+        str(out), output=str(tmp_path / "c9.zarr"), cfg=AppConfig(chunks=ChunkConfig(nnz_chunk=16, clevel=9, cpus=2))
+    )
+    root9 = zarr.open_group(str(tmp_path / "c9.zarr"), mode="r")
+    assert [c.clevel for c in root["X/data"].compressors] == [3]
+    assert [c.clevel for c in root9["X/data"].compressors] == [9]
+    assert [c.clevel for c in root9["layers/csc/data"].compressors] == [3]
 
     dense_src = _store(tmp_path, _adata(n=64, v=8), "dense_src.zarr", cfg(layout="dense"))
     for shard_factor in (1, 2):
@@ -164,9 +194,39 @@ def test_sort_eager_lazy_and_dense_agree_and_read_by_contiguous_runs(tmp_path: P
         )
 
 
-def test_sort_store_and_guards(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
-    adata = _adata()
+def _with_derived(adata: ad.AnnData) -> ad.AnnData:
+    # a counts layer, raw, and a cells x cells graph whose entries name their (row, column) pair
+    adata = adata.copy()
+    n = adata.n_obs
+    adata.layers["counts"] = (adata.X * 3).astype(np.float64)
+    adata.raw = adata.copy()
+    rows = np.repeat(np.arange(n), 3)
+    cols = (rows * 7 + np.tile([1, 2, 5], n)) % n
+    graph = sp.csr_matrix((rows * 1000.0 + cols, (rows, cols)), shape=(n, n))
+    graph.sum_duplicates()
+    adata.obsp["distances"] = graph
+    return adata
+
+
+def _assert_sorted_like(got: ad.AnnData, adata: ad.AnnData, layers: tuple[str, ...]) -> None:
+    perm = adata.obs_names.get_indexer(got.obs_names)
+    want = adata[perm]
+    np.testing.assert_array_equal(_dense(got.X), _dense(want.X))
+    np.testing.assert_allclose(got.obsm["X_umap"], want.obsm["X_umap"])
+    for k in layers:
+        np.testing.assert_array_equal(_dense(got.layers[k]), _dense(want.layers[k]), err_msg=k)
+    np.testing.assert_array_equal(_dense(got.raw.X), _dense(want.raw.X))
+    assert list(got.raw.var_names) == list(adata.raw.var_names)
+    np.testing.assert_array_equal(_dense(got.obsp["distances"]), _dense(want.obsp["distances"]))
+
+
+def test_sort_reorders_every_layer_raw_and_obsp(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    adata = _with_derived(_adata())
     out = _store(tmp_path, adata)
+    add_layer(str(out), layer="counts_csc", matrix="layers/counts", layout="csc", cfg=_layer_cfg(32))
+    dense_cfg = AppConfig(chunks=ChunkConfig(row_chunk=16, col_chunk=4, cpus=2))
+    add_layer(str(out), layer="counts_dense", matrix="layers/counts", layout="dense", cfg=dense_cfg)
+    adata.layers["counts_csc"] = adata.layers["counts_dense"] = adata.layers["counts"]
     sorted_out = tmp_path / "sorted.zarr"
     with caplog.at_level("INFO", logger="annizarr"):
         sort(str(out), output=str(sorted_out), by=("cell_type",), cfg=cfg())
@@ -174,15 +234,26 @@ def test_sort_store_and_guards(tmp_path: Path, caplog: pytest.LogCaptureFixture)
     assert_anndata_readable(sorted_out)
     got = ad.read_zarr(str(sorted_out))
     assert (np.diff(got.obs["cell_type"].cat.codes.to_numpy()) >= 0).all()
-    by_name = {n: (adata.X[i].toarray().ravel(), adata.obsm["X_umap"][i]) for i, n in enumerate(adata.obs_names)}
-    for i, n in enumerate(got.obs_names):
-        np.testing.assert_allclose(got.X[i].toarray().ravel(), by_name[n][0])
-        np.testing.assert_allclose(got.obsm["X_umap"][i], by_name[n][1])
+    _assert_sorted_like(got, adata, ("counts", "counts_csc", "counts_dense"))
+    root = zarr.open_group(str(sorted_out), mode="r")
+    assert root["layers/counts_csc"].attrs["encoding-type"] == "csc_matrix"  # each element keeps its own layout
+    assert root["layers/counts_dense"].chunks == (16, 4) and root["layers/counts_csc/data"].chunks == (32,)
 
     with pytest.raises(ConversionError, match="by="):
         sort(str(out), output=str(tmp_path / "s.zarr"), by=(), cfg=cfg())
     with pytest.raises(StorageError, match="already exists"):
         sort(str(out), output=str(sorted_out), by=("cell_type",), cfg=cfg())
+
+
+def test_convert_sort_by_carries_layers_raw_and_obsp(tmp_path: Path) -> None:
+    adata = _with_derived(_adata(seed=6))
+    adata.write_h5ad(tmp_path / "in.h5ad")
+    grouping = GroupingConfig(enabled=True, sort_by=("cell_type",))
+    for lazy in (True, False):
+        out = tmp_path / f"lazy{lazy}.zarr"
+        convert_h5ad(str(tmp_path / "in.h5ad"), output=str(out), cfg=cfg(lazy=lazy, grouping=grouping))
+        assert_anndata_readable(out)
+        _assert_sorted_like(ad.read_zarr(str(out)), adata, ("counts",))
 
 
 def test_append_extends_every_obs_encoding_and_drops_invalidated_obsm(
@@ -269,42 +340,67 @@ def test_append_guards_var_schema_dtype_and_duplicate_names(tmp_path: Path, capl
     assert any("2 duplicate" in m for m in messages(caplog))
 
 
-def test_append_drops_or_extends_derived_layers(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
-    a, b = _adata(n=30, seed=0), _adata(n=12, seed=1)
+def _layered(n: int, seed: int, *, wide: type) -> ad.AnnData:
+    adata = _adata(n=n, seed=seed)
+    adata.layers["counts"] = adata.X * 2
+    adata.layers["wide"] = (adata.X * 3).astype(wide)
+    return adata
+
+
+def test_append_appends_shared_layers_in_the_store_encoding(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    a, b = _layered(30, 0, wide=np.float64), _layered(12, 1, wide=np.float32)
+    b.layers["cells_only"] = b.X
     sa, sb = _store(tmp_path, a, "a.zarr"), _store(tmp_path, b, "b.zarr")
-    add_expr(str(sa), layout="csc", cfg=_layer_cfg(32))
-    with pytest.raises(ConversionError, match="layers"):  # derived elements never drop without consent
+    tiles = AppConfig(chunks=ChunkConfig(row_chunk=8, col_chunk=4, cpus=2))
+    level7 = AppConfig(chunks=ChunkConfig(nnz_chunk=32, clevel=7, cpus=2))
+    one_chunk = AppConfig(chunks=ChunkConfig(cpus=2))  # 9M-nonzero chunks: one chunk, capped at the layer's size
+    by_store = {
+        sa: {"by_gene": "csc", "tiles": "dense", "only_store": "csc", "whole": "csc"},
+        sb: {"by_gene": "csr", "tiles": "csc", "whole": "csr"},
+    }
+    for store, layouts in by_store.items():
+        for layer, layout in layouts.items():
+            layer_cfg = {"tiles": tiles, "whole": one_chunk}.get(layer, level7 if store == sa else _layer_cfg(32))
+            add_layer(str(store), layer=layer, matrix="layers/counts", layout=layout, cfg=layer_cfg)
+    whole_before = zarr.open_group(str(sa), mode="r")["layers/whole/data"]
+    assert whole_before.chunks[0] == whole_before.shape[0]  # one chunk, capped at the layer's own size
+
+    plan = plan_append(str(sa), cells=str(sb))
+    assert set(plan.append_layers) == {"counts", "wide", "by_gene", "tiles", "whole"}
+    assert plan.drop_layers == ("only_store",)
+    assert plan.drops() == ("obsm/X_umap", "layers/only_store")
+    assert any("layers ['cells_only']" in n for n in plan.notes)
+    with pytest.raises(ConversionError, match="layers/only_store"):  # a store-only layer never drops without consent
         append(str(sa), cells=str(sb), cfg=cfg())
     append(str(sa), cells=str(sb), drop_derived=True, cfg=cfg())
-    assert any("add-expr" in m for m in messages(caplog))
+    assert any("add-layer --layer only_store --matrix layers/counts" in m for m in messages(caplog))
+    assert any("by_gene is csc: rewriting it whole" in m for m in messages(caplog))
+    assert_anndata_readable(sa)
+
     got = ad.read_zarr(str(sa))
-    assert got.n_obs == 42 and "gexp" not in got.layers and len(got.obsm) == 0
-    add_expr(str(sa), layout="csc", target_sum=1e6, cfg=_layer_cfg(32))
-    np.testing.assert_allclose(_layer(sa), expected_lognorm(sp.vstack([a.X, b.X]), 1e6), rtol=1e-5)
+    root = zarr.open_group(str(sa), mode="r")
+    assert got.n_obs == 42 and "only_store" not in got.layers and "cells_only" not in got.layers
+    counts = sp.vstack([a.layers["counts"], b.layers["counts"]]).toarray()
+    for k in ("counts", "by_gene", "tiles", "whole"):
+        np.testing.assert_array_equal(_layer(sa, k), counts, err_msg=k)
+    np.testing.assert_array_equal(_layer(sa, "wide"), sp.vstack([a.layers["wide"], b.layers["wide"]]).toarray())
+    assert got.layers["wide"].dtype == np.float64  # the cells' float32 widened to the store's dtype
+    assert root["layers/by_gene"].attrs["encoding-type"] == "csc_matrix" and root["layers/by_gene/data"].chunks == (32,)
+    assert root["layers/by_gene"].attrs["annizarr-source"] == "layers/counts"  # kept through the rewrite
+    assert [c.clevel for c in root["layers/by_gene/data"].compressors] == [7]  # and so is its codec
+    whole = root["layers/whole/data"]  # a chunk only capped by the old size is not kept: the op's nnz_chunk applies
+    assert whole.shape[0] > whole_before.shape[0] and whole.chunks[0] == cfg().chunks.nnz_chunk
+    assert root["layers/tiles"].chunks == (8, 4)
 
-    # a csr layer with a recorded target_sum extends in place; a csc one, or a layer whose sparsity
-    # no longer matches X, drops instead
-    a2, b2 = _adata(n=30, seed=2), _adata(n=12, seed=3)
-    sa2, sb2 = _store(tmp_path, a2, "a2.zarr"), _store(tmp_path, b2, "b2.zarr")
-    add_expr(str(sa2), layout="csr", target_sum=1e6, cfg=_layer_cfg(32))
-    plan = plan_append(str(sa2), cells=str(sb2))
-    assert plan.extendable_layers == ("gexp",) and plan.drop_obsm == ("X_umap",) and plan.n_duplicate_names == 0
-    assert plan.drops() == ("obsm/X_umap", "layers/gexp") and plan.drops(extend_layers=True) == ("obsm/X_umap",)
-    append(str(sa2), cells=str(sb2), drop_derived=True, extend_layers=True, cfg=cfg())
-    assert any("extended layers ['gexp']" in m for m in messages(caplog))
-    layer = zarr.open_group(str(sa2), mode="r")["layers/gexp"]
-    assert layer.attrs["annizarr_target_sum"] == 1e6 and list(layer.attrs["shape"]) == [42, 6]
-    np.testing.assert_allclose(_layer(sa2), expected_lognorm(sp.vstack([a2.X, b2.X]), 1e6), rtol=1e-5)
-    gexp = introspect_gexp(layer)
-    assert (gexp.layout, gexp.nnz_chunk, gexp.target_sum) == ("csr", 32, 1e6)
-
-    a3, b3 = _adata(n=30, seed=4), _adata(n=12, seed=5)
-    sa3, sb3 = _store(tmp_path, a3, "a3.zarr"), _store(tmp_path, b3, "b3.zarr")
-    add_expr(str(sa3), layout="csr", cfg=_layer_cfg(32))
-    ip = zarr.open_group(str(sa3), mode="r+")["layers/gexp/indptr"]
-    ip[1] = int(ip[1]) + 1
-    append(str(sa3), cells=str(sb3), drop_derived=True, extend_layers=True, cfg=cfg())
-    assert any("sparsity differs from X" in m for m in messages(caplog)) and "gexp" not in ad.read_zarr(str(sa3)).layers
+    c, d = _layered(20, 2, wide=np.float32), _layered(5, 3, wide=np.float64)
+    sc, sd = _store(tmp_path, c, "c.zarr"), _store(tmp_path, d, "d.zarr")
+    with pytest.raises(ConversionError, match="layers/wide: the cells hold float64"):  # lossy: refused up front
+        append(str(sc), cells=str(sd), drop_derived=True, cfg=cfg())
+    assert ad.read_zarr(str(sc)).n_obs == 20
+    e, f = _layered(20, 4, wide=np.float64), _layered(5, 5, wide=np.int64)
+    se, sf = _store(tmp_path, e, "e.zarr"), _store(tmp_path, f, "f.zarr")
+    with pytest.raises(ConversionError, match="layers/wide: the cells hold int64"):  # numpy says safe; > 2**53 rounds
+        append(str(se), cells=str(sf), drop_derived=True, cfg=cfg())
 
 
 def test_append_reads_anndata_written_stores_and_keeps_the_store_column_encoding(tmp_path: Path) -> None:
@@ -375,25 +471,24 @@ def test_append_widens_categorical_codes_that_outgrow_the_stored_width(tmp_path:
     assert list(got.obs["sample"]) == [*a.obs["sample"], *b.obs["sample"]]
 
 
-def test_lifecycle_on_plain_and_consolidated_stores(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+def test_lifecycle_on_plain_and_consolidated_stores(tmp_path: Path) -> None:
     a, b = _adata(n=40, seed=0), _adata(n=15, seed=1)
     sa = _store(tmp_path, a, "a.zarr", cfg(consolidate_metadata=True))
     sb = _store(tmp_path, b, "b.zarr")
     sorted1 = tmp_path / "sorted1.zarr"
     sort(str(sa), output=str(sorted1), by=("cell_type",), cfg=cfg())
     append(str(sorted1), cells=str(sb), drop_derived=True, cfg=cfg())
-    add_expr(str(sorted1), layout="csc", cfg=_layer_cfg(32))
+    add_layer(str(sorted1), layer="csc", cfg=_layer_cfg(32))
     sort(str(sorted1), output=str(tmp_path / "sorted2.zarr"), by=("cell_type",), cfg=cfg())
-    assert any("re-derived" in m for m in messages(caplog))
     got = ad.read_zarr(str(tmp_path / "sorted2.zarr"))
-    assert got.n_obs == 55 and "gexp" in got.layers
+    assert got.n_obs == 55 and "csc" in got.layers
     assert (np.diff(got.obs["cell_type"].cat.codes.to_numpy()) >= 0).all()
     by_name = {n: r for src in (a, b) for n, r in zip(src.obs_names, src.X.toarray(), strict=True)}
     for i, n in enumerate(got.obs_names):
         np.testing.assert_allclose(got.X[i].toarray().ravel(), by_name[n])
-    np.testing.assert_allclose(got.layers["gexp"].toarray(), expected_lognorm(got.X), rtol=1e-5)
+    np.testing.assert_array_equal(got.layers["csc"].toarray(), got.X.toarray())
     # in-place ops on the consolidated store, whose workers reopen it without the stale metadata
-    add_expr(str(sa), layout="csc", cfg=_layer_cfg(32))
+    add_layer(str(sa), layer="csc", cfg=_layer_cfg(32))
     append(str(sa), cells=str(sb), drop_derived=True, cfg=cfg())
     assert ad.read_zarr(str(sa)).n_obs == 55
 

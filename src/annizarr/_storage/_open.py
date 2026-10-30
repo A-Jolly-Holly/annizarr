@@ -216,20 +216,22 @@ def verify_store_shape(
 ) -> None:
     # metadata plus one indptr read per CSR matrix; proves the store is shaped right, not which bytes it holds
     import numpy as np
+    import zarr
 
-    from annizarr._core._zarr import element_length, get_array, get_group, shape_attr, str_attr, str_list_attr
+    from annizarr._core._zarr import element_length, get_array, get_group, matrix_shape, str_attr, str_list_attr
 
-    indptr = np.asarray(get_array(get_group(root, "X"), "indptr")[:], dtype=np.int64)
-    if len(indptr) != n_obs + 1 or (np.diff(indptr) < 0).any():
-        raise StorageError(f"X/indptr is not {n_obs + 1} non-decreasing offsets.")
-    if nnz is not None and int(indptr[-1]) != nnz:
-        raise StorageError(f"X holds {int(indptr[-1])} nonzeros, expected {nnz}.")
     for path in ("X", *(f"layers/{k}" for k in layers)):
-        matrix = get_group(root, path)
-        if shape_attr(matrix) != (n_obs, n_vars):
-            raise StorageError(f"{path} shape {shape_attr(matrix)} != {(n_obs, n_vars)}.")
-        if path != "X" and not np.array_equal(get_array(matrix, "indptr")[:], indptr):
-            raise StorageError(f"{path}/indptr differs from X's.")
+        matrix = root[path]
+        if matrix_shape(matrix) != (n_obs, n_vars):
+            raise StorageError(f"{path} shape {matrix_shape(matrix)} != {(n_obs, n_vars)}.")
+        if isinstance(matrix, zarr.Array):
+            continue
+        n_major = n_obs if matrix.attrs.get("encoding-type") == "csr_matrix" else n_vars
+        indptr = np.asarray(get_array(matrix, "indptr")[:], dtype=np.int64)
+        if len(indptr) != n_major + 1 or (np.diff(indptr) < 0).any():
+            raise StorageError(f"{path}/indptr is not {n_major + 1} non-decreasing offsets.")
+        if path == "X" and nnz is not None and int(indptr[-1]) != nnz:
+            raise StorageError(f"X holds {int(indptr[-1])} nonzeros, expected {nnz}.")
         for name in ("data", "indices"):
             length = get_array(matrix, name).shape[0]
             if length != indptr[-1]:
